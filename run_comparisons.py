@@ -26,7 +26,8 @@ def _section(title: str):
 
 
 def main() -> int:
-    gui_mode = '--gui' in sys.argv
+    # gui_mode = '--gui' in sys.argv
+    gui_mode = True
 
     # ── Load ─────────────────────────────────────────────────────────────
     _section('Loading datasets')
@@ -64,8 +65,17 @@ def main() -> int:
         if ds.optical_constants:
             oc = ds.optical_constants
             valid_n = oc.n[np.isfinite(oc.n)]
-            logger.info(f'    Optical const: {len(oc.frequency_thz)} pts, '
-                         f'n [{np.nanmin(valid_n):.3f} – {np.nanmax(valid_n):.3f}]')
+            if len(valid_n) > 0:
+                logger.info(f'    Optical const: {len(oc.frequency_thz)} pts, '
+                             f'n [{np.nanmin(valid_n):.3f} – {np.nanmax(valid_n):.3f}]')
+            else:
+                # Identify which columns have real data
+                available = [name for name, arr in [
+                    ('n', oc.n), ('k', oc.k), ('ε₁', oc.eps1), ('ε₂', oc.eps2),
+                    ('σRe', oc.sigma_re), ('σIm', oc.sigma_im),
+                ] if np.any(np.isfinite(arr))]
+                logger.info(f'    Optical const: {len(oc.frequency_thz)} pts, '
+                             f'columns: {", ".join(available) if available else "none"}')
             if oc.eps_infty is not None:
                 logger.info(f'      eps_infty = {oc.eps_infty}')
         else:

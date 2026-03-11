@@ -238,37 +238,100 @@ def load_fft(filepath: str) -> FFTData:
 
 
 def load_optical_constants(filepath: str) -> OpticalConstants:
-    """Load an optical-constants file (7- or 8+-column variants)."""
+    """Load an optical-constants file with flexible column mapping.
+
+    Identifies columns by sniffing header labels rather than assuming fixed
+    positions.  Columns not present in the file are filled with NaN.
+    """
     lines = _read_lines(filepath)
     delim = _detect_delimiter(lines)
     n_hdr = _count_header_rows(lines, delim)
-    _, data = _parse_data_block(lines, delim, n_hdr)
-    n_cols = data.shape[1]
+    header_lines, data = _parse_data_block(lines, delim, n_hdr)
+    n_cols = data.shape[1] if data.ndim == 2 else 0
     logger.info(f"  Optical constants: {os.path.basename(filepath)} -> "
                 f"{data.shape[0]} rows x {n_cols} cols, {n_hdr} header row(s)")
 
-    freq, converted = _normalise_frequency(data[:, 0])
+    # ── Build column name list from the last header row ──────────────────
+    if header_lines:
+        raw_labels = _split_line(header_lines[-1], delim)
+    else:
+        raw_labels = [f"col{i}" for i in range(n_cols)]
+
+    col_labels = [_normalise_label(l) for l in raw_labels]
+
+    # ── Map canonical names → column indices ─────────────────────────────
+    col_map = _map_oc_columns(col_labels)
+    logger.info(f"    Column mapping: {col_map}")
+
+    n_rows = data.shape[0]
+
+    def _get_col(name: str) -> np.ndarray:
+        idx = col_map.get(name)
+        if idx is not None and idx < n_cols:
+            return data[:, idx]
+        return np.full(n_rows, np.nan)
+
+    freq, converted = _normalise_frequency(_get_col("frequency"))
     if converted:
         logger.info("    Converted frequencies from Hz → THz")
 
     eps_infty: Optional[float] = None
-    if n_cols >= 8:
-        col7 = data[:, 7]
-        valid = col7[np.isfinite(col7)]
-        if len(valid) > 0:
-            eps_infty = float(valid[0])
-            logger.info(f"    eps_infty = {eps_infty}")
+    eps_inf_col = _get_col("eps_infty")
+    valid_ei = eps_inf_col[np.isfinite(eps_inf_col)]
+    if len(valid_ei) > 0:
+        eps_infty = float(valid_ei[0])
+        logger.info(f"    eps_infty = {eps_infty}")
 
     return OpticalConstants(
         frequency_thz=freq,
-        n=data[:, 1],
-        k=data[:, 2],
-        eps1=data[:, 3],
-        eps2=data[:, 4],
-        sigma_re=data[:, 5],
-        sigma_im=data[:, 6],
+        n=_get_col("n"),
+        k=_get_col("k"),
+        eps1=_get_col("eps1"),
+        eps2=_get_col("eps2"),
+        sigma_re=_get_col("sigma_re"),
+        sigma_im=_get_col("sigma_im"),
         eps_infty=eps_infty,
     )
+
+
+# ── Optical-constants header sniffing helpers ────────────────────────────────
+
+# Regex patterns mapping header text → canonical field name.
+# Tried in order; first match wins for each column.
+_OC_LABEL_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("frequency", re.compile(r'freq', re.I)),
+    ("n",         re.compile(r'^n$|refrac', re.I)),
+    ("k",         re.compile(r'^k$|extinct', re.I)),
+    ("eps1",      re.compile(r'eps.*1|ε.*1|e1|real.*dielec', re.I)),
+    ("eps2",      re.compile(r'eps.*2|ε.*2|e2|imag.*dielec', re.I)),
+    ("sigma_re",  re.compile(r'σ\s*re|sigma.*re|σ_?re|sre|real.*cond', re.I)),
+    ("sigma_im",  re.compile(r'σ\s*im|sigma.*im|σ_?im|sim|imag.*cond', re.I)),
+    ("eps_infty", re.compile(r'eps.*inf|ε.*inf|infty|static', re.I)),
+]
+
+
+def _normalise_label(raw: str) -> str:
+    """Strip whitespace, units in parentheses, and common decoration."""
+    s = raw.strip()
+    s = re.sub(r'\(.*?\)', '', s).strip()  # remove (units)
+    return s
+
+
+def _map_oc_columns(labels: list[str]) -> dict[str, int]:
+    """Map canonical field names to column indices using header sniffing."""
+    mapping: dict[str, int] = {}
+    used_indices: set[int] = set()
+
+    for canonical, pattern in _OC_LABEL_PATTERNS:
+        for idx, lbl in enumerate(labels):
+            if idx in used_indices:
+                continue
+            if pattern.search(lbl):
+                mapping[canonical] = idx
+                used_indices.add(idx)
+                break
+
+    return mapping
 
 
 # ── Sanity checks ───────────────────────────────────────────────────────────

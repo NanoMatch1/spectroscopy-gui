@@ -90,6 +90,35 @@ def _fft_sam_phase(ds: AnalysisDataset):
         return ds.fft.sample_frequency_thz, ds.fft.sample_phase
     return None
 
+# -- Transfer function (sample / reference) --
+
+def _tf_amplitude(ds: AnalysisDataset):
+    if ds.fft is None:
+        return None
+    # Interpolate sample onto reference frequency grid for the ratio
+    ref_f = ds.fft.ref_frequency_thz
+    ref_a = ds.fft.ref_amplitude
+    sam_f = ds.fft.sample_frequency_thz
+    sam_a = ds.fft.sample_amplitude
+    if np.array_equal(ref_f, sam_f):
+        ratio = np.where(ref_a != 0, sam_a / ref_a, np.nan)
+        return ref_f, ratio
+    sam_interp = np.interp(ref_f, sam_f, sam_a)
+    ratio = np.where(ref_a != 0, sam_interp / ref_a, np.nan)
+    return ref_f, ratio
+
+def _tf_phase(ds: AnalysisDataset):
+    if ds.fft is None:
+        return None
+    ref_f = ds.fft.ref_frequency_thz
+    ref_p = ds.fft.ref_phase
+    sam_f = ds.fft.sample_frequency_thz
+    sam_p = ds.fft.sample_phase
+    if np.array_equal(ref_f, sam_f):
+        return ref_f, sam_p - ref_p
+    sam_interp = np.interp(ref_f, sam_f, sam_p)
+    return ref_f, sam_interp - ref_p
+
 # -- Optical constants --
 
 def _oc_n(ds: AnalysisDataset):
@@ -139,6 +168,10 @@ TRACE_REGISTRY: dict[str, list[tuple[str, str, callable, str]]] = {
         ("fft_ref_phase", "Reference phase",       _fft_ref_phase, "Phase (°)"),
         ("fft_sam_phase", "Sample phase",          _fft_sam_phase, "Phase (°)"),
     ],
+    "Transfer Function": [
+        ("tf_amplitude", "|H(f)| amplitude",  _tf_amplitude, "|H(f)|"),
+        ("tf_phase",     "Phase difference",  _tf_phase,     "Δφ (°)"),
+    ],
     "Optical Constants": [
         ("oc_n",        "Refractive index n",       _oc_n,        "n"),
         ("oc_k",        "Extinction coeff k",       _oc_k,        "k"),
@@ -152,10 +185,11 @@ TRACE_REGISTRY: dict[str, list[tuple[str, str, callable, str]]] = {
 DOMAIN_X_LABELS = {
     "Time Domain": "Time (ps)",
     "FFT": "Frequency (THz)",
+    "Transfer Function": "Frequency (THz)",
     "Optical Constants": "Frequency (THz)",
 }
 
-DOMAIN_ORDER = ["Time Domain", "FFT", "Optical Constants"]
+DOMAIN_ORDER = ["Time Domain", "FFT", "Transfer Function", "Optical Constants"]
 
 
 # ── Line-style cycling for traces within the same person ─────────────────────
@@ -192,6 +226,7 @@ class ComparisonGUI:
                 default = key in {
                     "td_win_ref", "td_win_sam",
                     "fft_ref_amp", "fft_sam_amp",
+                    "tf_amplitude", "tf_phase",
                     "oc_n", "oc_k",
                 }
                 v = tk.BooleanVar(value=default)
@@ -199,6 +234,35 @@ class ComparisonGUI:
                 self.trace_vars[key] = v
 
         self._redraw_pending = False
+
+        # Per-domain axis control state
+        self.autoscale_vars: dict[str, tk.BooleanVar] = {}
+        self.manual_x_enabled: dict[str, tk.BooleanVar] = {}
+        self.manual_y_enabled: dict[str, tk.BooleanVar] = {}
+        self.manual_x_min: dict[str, tk.StringVar] = {}
+        self.manual_x_max: dict[str, tk.StringVar] = {}
+        self.manual_y_min: dict[str, tk.StringVar] = {}
+        self.manual_y_max: dict[str, tk.StringVar] = {}
+        # Saved limits from last redraw (used when autoscale is off)
+        self._saved_xlim: dict[str, tuple[float, float]] = {}
+        self._saved_ylim: dict[str, tuple[float, float]] = {}
+
+        for domain in DOMAIN_ORDER:
+            v = tk.BooleanVar(value=True)
+            v.trace_add("write", lambda *_: self._schedule_redraw())
+            self.autoscale_vars[domain] = v
+
+            mx = tk.BooleanVar(value=False)
+            mx.trace_add("write", lambda *_: self._schedule_redraw())
+            self.manual_x_enabled[domain] = mx
+            my = tk.BooleanVar(value=False)
+            my.trace_add("write", lambda *_: self._schedule_redraw())
+            self.manual_y_enabled[domain] = my
+
+            self.manual_x_min[domain] = tk.StringVar(value="")
+            self.manual_x_max[domain] = tk.StringVar(value="")
+            self.manual_y_min[domain] = tk.StringVar(value="")
+            self.manual_y_max[domain] = tk.StringVar(value="")
 
         # ── Layout ───────────────────────────────────────────
         self._build_sidebar()
@@ -223,14 +287,29 @@ class ComparisonGUI:
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
+        # Enable mousewheel scrolling on the sidebar canvas
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _bind_wheel(event):
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        def _unbind_wheel(event):
+            canvas.unbind_all("<MouseWheel>")
+
+        canvas.bind("<Enter>", _bind_wheel)
+        canvas.bind("<Leave>", _unbind_wheel)
+
+        self._section_frames: dict[str, ttk.Frame] = {}
+        self._section_visible: dict[str, tk.BooleanVar] = {}
+
         # -- People section --
-        lbl = ttk.Label(inner, text="People", font=("TkDefaultFont", 11, "bold"))
-        lbl.pack(anchor="w", pady=(4, 2), padx=4)
+        people_body = self._build_collapsible(inner, "People")
 
         for idx, name in enumerate(self.names):
             colour = _person_colour(idx)
-            frame = ttk.Frame(inner)
-            frame.pack(anchor="w", padx=8)
+            frame = ttk.Frame(people_body)
+            frame.pack(anchor="w", padx=4)
             cb = tk.Checkbutton(
                 frame, text=f"  {name}", variable=self.person_vars[name],
                 fg=colour, selectcolor="#ffffff",
@@ -243,21 +322,86 @@ class ComparisonGUI:
 
         # -- Trace sections --
         for domain in DOMAIN_ORDER:
-            lbl = ttk.Label(inner, text=domain, font=("TkDefaultFont", 11, "bold"))
-            lbl.pack(anchor="w", pady=(6, 2), padx=4)
+            body = self._build_collapsible(inner, domain)
 
-            btn_frame = ttk.Frame(inner)
-            btn_frame.pack(anchor="w", padx=8)
+            btn_frame = ttk.Frame(body)
+            btn_frame.pack(anchor="w", padx=4)
             ttk.Button(btn_frame, text="All", width=4,
                        command=lambda d=domain: self._set_domain_traces(d, True)).pack(side=tk.LEFT)
             ttk.Button(btn_frame, text="None", width=4,
                        command=lambda d=domain: self._set_domain_traces(d, False)).pack(side=tk.LEFT, padx=2)
 
             for key, label, _, _ in TRACE_REGISTRY[domain]:
-                cb = ttk.Checkbutton(inner, text=label, variable=self.trace_vars[key])
-                cb.pack(anchor="w", padx=16)
+                cb = ttk.Checkbutton(body, text=label, variable=self.trace_vars[key])
+                cb.pack(anchor="w", padx=12)
+
+            # -- Axis controls --
+            axis_lbl = ttk.Label(body, text="Axis controls", font=("TkDefaultFont", 9, "italic"))
+            axis_lbl.pack(anchor="w", padx=8, pady=(4, 0))
+
+            auto_cb = ttk.Checkbutton(body, text="Autoscale",
+                                       variable=self.autoscale_vars[domain])
+            auto_cb.pack(anchor="w", padx=12)
+
+            # X limits
+            xf = ttk.Frame(body)
+            xf.pack(anchor="w", padx=12, pady=1)
+            ttk.Checkbutton(xf, text="X:", variable=self.manual_x_enabled[domain],
+                            width=3).pack(side=tk.LEFT)
+            ex_min = ttk.Entry(xf, textvariable=self.manual_x_min[domain], width=8)
+            ex_min.pack(side=tk.LEFT, padx=1)
+            ex_min.bind("<Return>", lambda e: self._schedule_redraw())
+            ttk.Label(xf, text="\u2013").pack(side=tk.LEFT)
+            ex_max = ttk.Entry(xf, textvariable=self.manual_x_max[domain], width=8)
+            ex_max.pack(side=tk.LEFT, padx=1)
+            ex_max.bind("<Return>", lambda e: self._schedule_redraw())
+
+            # Y limits
+            yf = ttk.Frame(body)
+            yf.pack(anchor="w", padx=12, pady=1)
+            ttk.Checkbutton(yf, text="Y:", variable=self.manual_y_enabled[domain],
+                            width=3).pack(side=tk.LEFT)
+            ey_min = ttk.Entry(yf, textvariable=self.manual_y_min[domain], width=8)
+            ey_min.pack(side=tk.LEFT, padx=1)
+            ey_min.bind("<Return>", lambda e: self._schedule_redraw())
+            ttk.Label(yf, text="\u2013").pack(side=tk.LEFT)
+            ey_max = ttk.Entry(yf, textvariable=self.manual_y_max[domain], width=8)
+            ey_max.pack(side=tk.LEFT, padx=1)
+            ey_max.bind("<Return>", lambda e: self._schedule_redraw())
 
             ttk.Separator(inner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4, padx=4)
+
+    def _build_collapsible(self, parent: ttk.Frame, title: str) -> ttk.Frame:
+        """Create a collapsible section.  Returns the body frame."""
+        var = tk.BooleanVar(value=True)
+        self._section_visible[title] = var
+
+        header = ttk.Frame(parent)
+        header.pack(fill=tk.X, padx=4, pady=(4, 0))
+
+        body = ttk.Frame(parent)
+        body.pack(fill=tk.X, padx=4)
+        self._section_frames[title] = body
+
+        def _toggle():
+            if var.get():
+                body.pack_forget()
+                var.set(False)
+                btn.configure(text="\u25B6")
+            else:
+                # Re-pack body right after header
+                body.pack(fill=tk.X, padx=4, after=header)
+                var.set(True)
+                btn.configure(text="\u25BC")
+
+        btn = ttk.Button(header, text="\u25BC", width=2, command=_toggle)
+        btn.pack(side=tk.LEFT)
+        lbl = ttk.Label(header, text=title, font=("TkDefaultFont", 11, "bold"),
+                         cursor="hand2")
+        lbl.pack(side=tk.LEFT, padx=4)
+        lbl.bind("<Button-1>", lambda e: _toggle())
+
+        return body
 
     def _set_domain_traces(self, domain: str, state: bool):
         for key, *_ in TRACE_REGISTRY[domain]:
@@ -387,6 +531,41 @@ class ComparisonGUI:
                 )
 
             ax.grid(True, alpha=0.3)
+
+            # ── Apply axis limits ─────────────────────────────
+            # Priority: manual override > saved (non-autoscale) > matplotlib auto
+            x_set = False
+            y_set = False
+
+            if self.manual_x_enabled[domain].get():
+                try:
+                    xlo = float(self.manual_x_min[domain].get())
+                    xhi = float(self.manual_x_max[domain].get())
+                    if xlo < xhi:
+                        ax.set_xlim(xlo, xhi)
+                        x_set = True
+                except (ValueError, TypeError):
+                    pass
+
+            if self.manual_y_enabled[domain].get():
+                try:
+                    ylo = float(self.manual_y_min[domain].get())
+                    yhi = float(self.manual_y_max[domain].get())
+                    if ylo < yhi:
+                        ax.set_ylim(ylo, yhi)
+                        y_set = True
+                except (ValueError, TypeError):
+                    pass
+
+            if not self.autoscale_vars[domain].get():
+                if not x_set and domain in self._saved_xlim:
+                    ax.set_xlim(self._saved_xlim[domain])
+                if not y_set and domain in self._saved_ylim:
+                    ax.set_ylim(self._saved_ylim[domain])
+
+            # Save current limits for next non-autoscale redraw
+            self._saved_xlim[domain] = ax.get_xlim()
+            self._saved_ylim[domain] = ax.get_ylim()
 
         self.fig.set_tight_layout(True)
         self.canvas.draw_idle()
