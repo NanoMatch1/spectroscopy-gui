@@ -10,6 +10,6 @@ Design systems so that each stage can be independently tested. Functions should 
 
 Where appropriate, support simulation or mock modes that reproduce the behavior of hardware, external systems, or data sources. This allows troubleshooting, algorithm development, and testing without requiring the full physical system.
 
-Favor explicit configuration, clear data flow, and transparent processing pipelines. Avoid hidden global state.
+Favor explicit configuration, clear data flow, and transparent processing pipelines. Avoid hidden global state, except in the case of registries.
 
 In general, write code that is easy to debug, extend, and reason about months later—especially in scientific or experimental contexts where reproducibility and inspection are critical.

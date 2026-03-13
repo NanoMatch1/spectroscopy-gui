@@ -1,0 +1,281 @@
+"""Main GUI application — orchestrates sidebar, plot area, and parameter panel.
+
+``MatchbookApp`` is the top-level window.  It is entirely generic:
+all domain content comes from registered modules via their descriptors.
+"""
+
+from __future__ import annotations
+
+import logging
+import tkinter as tk
+from tkinter import ttk
+from typing import Any
+
+import matplotlib
+matplotlib.use("TkAgg")
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.figure import Figure
+
+from matchbook.core.data_service import DataService
+from matchbook.core.module_base import DataGroupDescriptor
+from matchbook.core.pipeline import Pipeline
+from matchbook.core.registry import Registry
+from matchbook.gui import plot_area, sidebar, theme
+from matchbook.gui.parameter_panel import ParameterPanel
+from matchbook.gui.pipeline_view import PipelineView
+
+logger = logging.getLogger(__name__)
+
+
+class MatchbookApp:
+    """Top-level GUI window.
+
+    Usage::
+
+        ds = DataService()
+        registry = Registry(ds)
+        registry.register(some_module)
+        # ... load data into ds ...
+
+        app = MatchbookApp(ds, registry)
+        app.run()
+    """
+
+    def __init__(
+        self,
+        data_service: DataService,
+        registry: Registry,
+        title: str = "Matchbook Analysis",
+    ) -> None:
+        self._data_service = data_service
+        self._registry = registry
+
+        # -- Root window -----------------------------------------------
+        self.root = tk.Tk()
+        self.root.title(title)
+        self.root.geometry("1500x850")
+        self.root.minsize(1000, 500)
+
+        # -- Collect descriptors from all registered modules -----------
+        self._data_groups: list[DataGroupDescriptor] = registry.all_data_groups
+        self._series_names: list[str] = sorted(data_service.list_series())
+
+        # -- State variables -------------------------------------------
+
+        # Series toggles
+        self._series_vars: dict[str, tk.BooleanVar] = {}
+        for name in self._series_names:
+            v = tk.BooleanVar(value=True)
+            v.trace_add("write", lambda *_a: self._schedule_redraw())
+            self._series_vars[name] = v
+
+        # Trace toggles
+        self._trace_vars: dict[str, tk.BooleanVar] = {}
+        for group in self._data_groups:
+            for trace in group.traces:
+                v = tk.BooleanVar(value=trace.default_visible)
+                v.trace_add("write", lambda *_a: self._schedule_redraw())
+                self._trace_vars[trace.key] = v
+
+        # Per-group axis controls
+        self._autoscale_vars: dict[str, tk.BooleanVar] = {}
+        self._manual_x_enabled: dict[str, tk.BooleanVar] = {}
+        self._manual_y_enabled: dict[str, tk.BooleanVar] = {}
+        self._manual_x_min: dict[str, tk.StringVar] = {}
+        self._manual_x_max: dict[str, tk.StringVar] = {}
+        self._manual_y_min: dict[str, tk.StringVar] = {}
+        self._manual_y_max: dict[str, tk.StringVar] = {}
+        self._saved_xlim: dict[str, tuple[float, float]] = {}
+        self._saved_ylim: dict[str, tuple[float, float]] = {}
+
+        for group in self._data_groups:
+            gk = group.key
+            v = tk.BooleanVar(value=True)
+            v.trace_add("write", lambda *_a: self._schedule_redraw())
+            self._autoscale_vars[gk] = v
+
+            mx = tk.BooleanVar(value=False)
+            mx.trace_add("write", lambda *_a: self._schedule_redraw())
+            self._manual_x_enabled[gk] = mx
+            my = tk.BooleanVar(value=False)
+            my.trace_add("write", lambda *_a: self._schedule_redraw())
+            self._manual_y_enabled[gk] = my
+
+            self._manual_x_min[gk] = tk.StringVar(value="")
+            self._manual_x_max[gk] = tk.StringVar(value="")
+            self._manual_y_min[gk] = tk.StringVar(value="")
+            self._manual_y_max[gk] = tk.StringVar(value="")
+
+        self._redraw_pending = False
+
+        # -- Build layout ----------------------------------------------
+        self._build_ui()
+
+        # -- Subscribe to DataService changes --------------------------
+        self._data_service.subscribe(self._on_data_changed)
+
+        # -- Initial draw ----------------------------------------------
+        self._do_redraw()
+
+    # -----------------------------------------------------------------
+    # UI construction
+    # -----------------------------------------------------------------
+
+    def _build_ui(self) -> None:
+        # Left: sidebar
+        sidebar.build_sidebar(
+            self.root,
+            self._series_names,
+            self._series_vars,
+            self._data_groups,
+            self._trace_vars,
+            self._autoscale_vars,
+            self._manual_x_enabled,
+            self._manual_y_enabled,
+            self._manual_x_min,
+            self._manual_x_max,
+            self._manual_y_min,
+            self._manual_y_max,
+            self._schedule_redraw,
+        )
+
+        # Right: parameter panel (if any module has pipeline steps)
+        all_step_descs = []
+        self._active_pipeline: Pipeline | None = None
+        for record in self._registry.registered_modules.values():
+            all_step_descs.extend(record.pipeline_step_descriptors)
+            if self._active_pipeline is None:
+                self._active_pipeline = record.pipeline
+
+        if all_step_descs:
+            self._param_panel = ParameterPanel(
+                self.root,
+                all_step_descs,
+                on_param_changed=self._on_param_changed,
+                on_run_from=self._on_run_from,
+            )
+
+            # Pipeline view inside the parameter panel
+            if self._active_pipeline is not None:
+                self._pipeline_view = PipelineView(
+                    self._param_panel.frame,
+                    self._active_pipeline,
+                    on_step_selected=self._on_step_selected,
+                    on_run_from=self._on_run_from,
+                    on_rewind=self._on_rewind,
+                )
+        else:
+            self._param_panel = None
+            self._pipeline_view = None
+
+        # Centre: plot area
+        self._plot_frame = ttk.Frame(self.root)
+        self._plot_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True,
+                              padx=6, pady=6)
+
+        self._fig = Figure(figsize=(10, 7), dpi=100, tight_layout=True)
+        self._canvas = FigureCanvasTkAgg(self._fig, master=self._plot_frame)
+        self._toolbar = NavigationToolbar2Tk(self._canvas, self._plot_frame)
+        self._toolbar.update()
+        self._canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    # -----------------------------------------------------------------
+    # Redraw
+    # -----------------------------------------------------------------
+
+    def _schedule_redraw(self) -> None:
+        """Coalesce rapid toggles into a single redraw (50 ms debounce)."""
+        if not self._redraw_pending:
+            self._redraw_pending = True
+            self.root.after(50, self._do_redraw)
+
+    def _do_redraw(self) -> None:
+        self._redraw_pending = False
+
+        active_series = [
+            name for name in self._series_names
+            if self._series_vars[name].get()
+        ]
+        trace_vis = {k: v.get() for k, v in self._trace_vars.items()}
+        autoscale = {k: v.get() for k, v in self._autoscale_vars.items()}
+        mx_en = {k: v.get() for k, v in self._manual_x_enabled.items()}
+        my_en = {k: v.get() for k, v in self._manual_y_enabled.items()}
+        mx_min = {k: v.get() for k, v in self._manual_x_min.items()}
+        mx_max = {k: v.get() for k, v in self._manual_x_max.items()}
+        my_min = {k: v.get() for k, v in self._manual_y_min.items()}
+        my_max = {k: v.get() for k, v in self._manual_y_max.items()}
+
+        plot_area.redraw(
+            self._fig,
+            self._data_service,
+            active_series,
+            self._series_names,
+            self._data_groups,
+            trace_vis,
+            autoscale,
+            mx_en, my_en,
+            mx_min, mx_max,
+            my_min, my_max,
+            self._saved_xlim,
+            self._saved_ylim,
+        )
+        self._canvas.draw_idle()
+
+    # -----------------------------------------------------------------
+    # DataService observer
+    # -----------------------------------------------------------------
+
+    def _on_data_changed(self, event: str, key: Any) -> None:
+        """Called when data is added/removed — refresh the series list and redraw."""
+        new_series = sorted(self._data_service.list_series())
+        if new_series != self._series_names:
+            # A new series appeared — add its toggle
+            for name in new_series:
+                if name not in self._series_vars:
+                    v = tk.BooleanVar(value=True)
+                    v.trace_add("write", lambda *_a: self._schedule_redraw())
+                    self._series_vars[name] = v
+            self._series_names = new_series
+        self._schedule_redraw()
+
+    # -----------------------------------------------------------------
+    # Pipeline interaction callbacks
+    # -----------------------------------------------------------------
+
+    def _on_param_changed(self, step_id: str, param_name: str,
+                          value: Any) -> None:
+        """Widget value changed — push to pipeline."""
+        if self._active_pipeline is not None:
+            try:
+                self._active_pipeline.set_param(step_id, param_name, value)
+            except KeyError:
+                pass
+        if self._pipeline_view is not None:
+            self._pipeline_view.refresh()
+
+    def _on_run_from(self, step_id: str) -> None:
+        """Run the pipeline from the given step for all active series."""
+        if self._active_pipeline is None:
+            return
+        for series_id in self._series_names:
+            if self._series_vars.get(series_id, tk.BooleanVar(value=False)).get():
+                self._active_pipeline.run_from(
+                    step_id, self._data_service, series_id)
+        self._schedule_redraw()
+
+    def _on_step_selected(self, step_id: str) -> None:
+        logger.debug(f"Pipeline step selected: {step_id}")
+
+    def _on_rewind(self, history_index: int) -> None:
+        if self._active_pipeline is not None:
+            self._active_pipeline.rewind(history_index)
+            if self._pipeline_view is not None:
+                self._pipeline_view.refresh()
+
+    # -----------------------------------------------------------------
+    # Run
+    # -----------------------------------------------------------------
+
+    def run(self) -> None:
+        """Start the tkinter event loop."""
+        self.root.mainloop()
