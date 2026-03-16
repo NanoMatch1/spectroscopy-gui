@@ -1,7 +1,7 @@
-"""Load THz TDS data files and run sanity checks.
+"""Generic THz TDS data-file loaders and sanity checks.
 
 This module has **no framework dependencies** — it uses only stdlib and numpy.
-It handles format variations across different analysis pipelines:
+It provides format-agnostic loading for common THz data file layouts:
   - Tab- and space-delimited files
   - 1- or 2-row headers
   - Frequency in Hz or THz (auto-detected and normalised to THz)
@@ -9,15 +9,16 @@ It handles format variations across different analysis pipelines:
   - 4-column and 12-column time-domain layouts
   - 9-column and 10-column FFT layouts
   - 7- or 8+-column optical-constants layouts
+
+Discovery functions scan directories for series sub-folders, load whatever
+recognised files they contain, and return ``AnalysisDataset`` bundles.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
-from collections import OrderedDict
 from typing import Optional
 
 import numpy as np
@@ -27,7 +28,6 @@ from matchbook.modules.thz.models import (
     FFTData,
     OpticalConstants,
     RawMeasurement,
-    SampleInfo,
     TimeDomainData,
 )
 
@@ -136,15 +136,23 @@ def _optional_array(arr: np.ndarray) -> Optional[np.ndarray]:
 # File-type loaders
 # ---------------------------------------------------------------------------
 
-def load_raw_measurement(filepath: str) -> RawMeasurement:
-    """Load a 2-column space-delimited raw measurement file (no header)."""
+def load_two_column(filepath: str) -> RawMeasurement:
+    """Load a 2-column numeric file (any delimiter, auto-detected header).
+
+    Returns a ``RawMeasurement`` with the first column as *time_ps* and
+    the second as *amplitude*.  Suitable for any simple (x, y) data.
+    """
     lines = _read_lines(filepath)
     delim = _detect_delimiter(lines)
     n_hdr = _count_header_rows(lines, delim)
     _, data = _parse_data_block(lines, delim, n_hdr)
-    logger.info(f"  Raw measurement: {os.path.basename(filepath)} -> "
+    logger.info(f"  Two-column load: {os.path.basename(filepath)} -> "
                 f"{data.shape[0]} rows, {n_hdr} header row(s)")
     return RawMeasurement(time_ps=data[:, 0], amplitude=data[:, 1])
+
+
+# Backward-compatible alias
+load_raw_measurement = load_two_column
 
 
 def load_time_domain(filepath: str) -> TimeDomainData:
@@ -389,18 +397,31 @@ def sanity_check(dataset: AnalysisDataset) -> list[str]:
 # Discovery and orchestration
 # ---------------------------------------------------------------------------
 
-def discover_people(data_dir: str) -> list[str]:
-    """Find person names from subdirectories (excluding 'original')."""
+def discover_series(
+    data_dir: str,
+    exclude: set[str] | None = None,
+) -> list[str]:
+    """Find series names from sub-directories of *data_dir*.
+
+    Parameters
+    ----------
+    data_dir:
+        Parent directory containing one sub-folder per series.
+    exclude:
+        Optional set of directory names to skip (e.g. ``{"original"}``).  
+        Defaults to ``{"original"}`` when *None*.
+    """
+    if exclude is None:
+        exclude = {"original"}
     return sorted(
         entry for entry in os.listdir(data_dir)
-        if os.path.isdir(os.path.join(data_dir, entry)) and entry != 'original'
+        if os.path.isdir(os.path.join(data_dir, entry)) and entry not in exclude
     )
 
 
-def load_sample_info(json_path: str) -> SampleInfo:
-    with open(json_path, 'r') as f:
-        d = json.load(f)
-    return SampleInfo(thickness_m=d['thickness'], resistivity_ohm_m=d['resistivity'])
+# Backward-compatible alias
+def discover_people(data_dir: str) -> list[str]:
+    return discover_series(data_dir)
 
 
 def _find_file(directory: str, pattern: str) -> Optional[str]:
@@ -411,31 +432,36 @@ def _find_file(directory: str, pattern: str) -> Optional[str]:
     return None
 
 
-def load_person(
+def load_series_folder(
     name: str,
-    person_dir: str,
-    raw_ref: RawMeasurement,
-    raw_sam: RawMeasurement,
-    sample_info: SampleInfo,
+    folder_path: str,
+    raw_ref: RawMeasurement | None = None,
+    raw_sam: RawMeasurement | None = None,
 ) -> AnalysisDataset:
-    """Load all available data files for one person."""
+    """Load all recognised data files from a single series folder.
+
+    Scans *folder_path* for time-domain, FFT, and optical-constants files
+    matching common naming conventions.  All parameters besides *name* and
+    *folder_path* are optional — the result will simply have ``None`` for
+    any data category that was not found.
+    """
     logger.info(f"Loading dataset for '{name}'")
 
     td = fft_data = oc = None
 
-    td_file = _find_file(person_dir, r'time.?domain')
+    td_file = _find_file(folder_path, r'time.?domain')
     if td_file:
         td = load_time_domain(td_file)
     else:
         logger.info(f"  No time-domain file found for {name}")
 
-    fft_file = _find_file(person_dir, r'fft')
+    fft_file = _find_file(folder_path, r'fft')
     if fft_file:
         fft_data = load_fft(fft_file)
     else:
         logger.info(f"  No FFT file found for {name}")
 
-    oc_file = _find_file(person_dir, r'optical.?constant')
+    oc_file = _find_file(folder_path, r'optical.?constant')
     if oc_file:
         oc = load_optical_constants(oc_file)
     else:
@@ -443,7 +469,6 @@ def load_person(
 
     return AnalysisDataset(
         name=name,
-        sample_info=sample_info,
         raw_reference=raw_ref,
         raw_sample=raw_sam,
         time_domain=td,
@@ -452,33 +477,43 @@ def load_person(
     )
 
 
-def load_all(base_dir: str, sample_json: str) -> list[AnalysisDataset]:
-    """Discover and load every person's dataset."""
-    sample_info = load_sample_info(sample_json)
-    data_dir = os.path.join(base_dir, 'data')
-    original_dir = os.path.join(data_dir, 'original')
+def load_directory(
+    data_dir: str,
+    exclude: set[str] | None = None,
+    raw_dir: str | None = None,
+) -> list[AnalysisDataset]:
+    """Discover series sub-folders in *data_dir* and load each one.
 
-    ref_file = _find_file(original_dir, r'reference')
-    sam_file = _find_file(original_dir, r'sample')
-    if not ref_file or not sam_file:
-        raise FileNotFoundError(
-            "Could not find reference/sample raw measurement files in data/original/"
-        )
+    Parameters
+    ----------
+    data_dir:
+        Top-level directory containing one sub-folder per series.
+    exclude:
+        Directory names to skip (passed to :func:`discover_series`).
+    raw_dir:
+        Optional path to a folder containing shared reference / sample raw
+        files (e.g. a pre-existing ``original/`` folder).  If provided,
+        files matching ``reference`` and ``sample`` are loaded and attached
+        to every series.
+    """
+    raw_ref = raw_sam = None
+    if raw_dir and os.path.isdir(raw_dir):
+        ref_file = _find_file(raw_dir, r'reference')
+        sam_file = _find_file(raw_dir, r'sample')
+        if ref_file:
+            raw_ref = load_two_column(ref_file)
+            logger.info(f"Raw reference: {len(raw_ref.time_ps)} pts")
+        if sam_file:
+            raw_sam = load_two_column(sam_file)
+            logger.info(f"Raw sample:    {len(raw_sam.time_ps)} pts")
 
-    raw_ref = load_raw_measurement(ref_file)
-    raw_sam = load_raw_measurement(sam_file)
-    logger.info(f"Raw reference: {len(raw_ref.time_ps)} points, "
-                f"time [{raw_ref.time_ps[0]:.2f}, {raw_ref.time_ps[-1]:.2f}] ps")
-    logger.info(f"Raw sample:    {len(raw_sam.time_ps)} points, "
-                f"time [{raw_sam.time_ps[0]:.2f}, {raw_sam.time_ps[-1]:.2f}] ps")
-
-    people = discover_people(data_dir)
-    logger.info(f"Discovered people: {people}")
+    series_names = discover_series(data_dir, exclude=exclude)
+    logger.info(f"Discovered series: {series_names}")
 
     datasets = []
-    for name in people:
-        person_dir = os.path.join(data_dir, name)
-        ds = load_person(name, person_dir, raw_ref, raw_sam, sample_info)
+    for name in series_names:
+        folder = os.path.join(data_dir, name)
+        ds = load_series_folder(name, folder, raw_ref=raw_ref, raw_sam=raw_sam)
         datasets.append(ds)
 
     return datasets

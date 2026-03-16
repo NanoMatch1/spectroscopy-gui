@@ -1,7 +1,10 @@
 """SQLite-backed database for persistent series storage.
 
 Stores series metadata, tags, data blobs (as numpy binary), and pipeline
-parameter snapshots — enabling save / load / filter / restore workflows.
+parameter snapshots — enabling save / load / filter / restore / **search**
+workflows.
+
+Searches use the extensible filter registry in ``matchbook.io.search``.
 """
 
 from __future__ import annotations
@@ -16,6 +19,10 @@ from typing import Any
 import numpy as np
 
 from matchbook.core.data_service import DataEntry, DataKey, DataService
+from matchbook.io.search import (
+    build_search_query,
+    registered_post_filters,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +83,12 @@ CREATE TABLE IF NOT EXISTS pipeline_snapshots (
     label       TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (series_id) REFERENCES series(id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_series_name       ON series(name);
+CREATE INDEX IF NOT EXISTS idx_series_created_at ON series(created_at);
+CREATE INDEX IF NOT EXISTS idx_data_blobs_grp    ON data_blobs(grp);
+CREATE INDEX IF NOT EXISTS idx_data_blobs_name   ON data_blobs(name);
+CREATE INDEX IF NOT EXISTS idx_series_tags_tag   ON series_tags(tag);
 """
 
 
@@ -249,6 +262,46 @@ class Database:
                 "tags": series_tags,
                 "metadata": json.loads(meta_json) if meta_json else {},
             })
+
+        return results
+
+    # -- Extensible search -------------------------------------------------
+
+    def search(self, **criteria: Any) -> list[dict[str, Any]]:
+        """Search for series using the registered filter system.
+
+        Keyword arguments are ``{filter_name: value}`` pairs.  Only filter
+        names from ``matchbook.io.search`` are accepted.
+
+        Examples::
+
+            db.search(name_contains="germanium")
+            db.search(has_group="fft", date_after="2026-01-01")
+            db.search(text_search="ref", has_tag="thz_tds")
+            db.search(metadata_field=("scan_count", ">=", 5))
+        """
+        sql, params = build_search_query(criteria)
+        rows = self._conn.execute(sql, params).fetchall()
+
+        results = []
+        for sid, name, mod, created, meta_json in rows:
+            tag_rows = self._conn.execute(
+                "SELECT tag FROM series_tags WHERE series_id = ?", (sid,)
+            ).fetchall()
+            results.append({
+                "id": sid,
+                "name": name,
+                "module": mod,
+                "created_at": created,
+                "tags": {t for (t,) in tag_rows},
+                "metadata": json.loads(meta_json) if meta_json else {},
+            })
+
+        # Apply post-filters
+        post_filters = registered_post_filters()
+        for key in list(criteria):
+            if key in post_filters:
+                results = post_filters[key](results, criteria[key], self._conn)
 
         return results
 

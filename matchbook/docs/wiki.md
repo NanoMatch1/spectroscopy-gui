@@ -18,6 +18,7 @@
    - 4.1 [Three-Layer Storage Model](#41-three-layer-storage-model)
    - 4.2 [SQLite Database](#42-sqlite-database)
    - 4.3 [Dirty Tracking & Sync](#43-dirty-tracking--sync)
+   - 4.4 [Search & Query System](#44-search--query-system)
 5. [File I/O — Loader Registry](#5-file-io--loader-registry)
    - 5.1 [Registry Mechanism](#51-registry-mechanism)
    - 5.2 [BaseLoader Interface](#52-baseloader-interface)
@@ -432,6 +433,7 @@ Query properties: `report.ok`, `report.has_errors`, `report.has_warnings`, `repo
 | `load_series(series_id, ds)` | Load from DB into DataService |
 | `delete_series(series_id)` | Remove a series and all related data |
 | `list_series(module, tags)` | Query series with filters |
+| `search(**criteria)` | Extensible search via filter registry |
 | `sync_dirty(ds)` | Write only dirty entries/associations |
 | `save_pipeline_snapshot(...)` | Save parameter state |
 | `load_pipeline_snapshot(id)` | Restore parameter state |
@@ -454,6 +456,77 @@ The `sync_dirty()` method performs an incremental write:
 6. Commits and calls `data_service.mark_clean()`.
 
 This is more efficient than `save_series()` which writes everything for a series regardless of what changed.
+
+### 4.4 Search & Query System
+
+**File:** `matchbook/io/search.py`
+
+An extensible filter registry for database queries, using the same decorator pattern as the loader registry.
+
+#### Registering Filters
+
+**SQL filters** (`@register_filter`) generate WHERE clause fragments:
+
+```python
+from matchbook.io.search import register_filter
+
+@register_filter("min_rows")
+def _min_rows(value: int) -> tuple[str, list]:
+    return (
+        "s.id IN ("
+        "  SELECT series_id FROM data_blobs "
+        "  GROUP BY series_id "
+        "  HAVING SUM(length(y_blob) / 8) >= ?"
+        ")",
+        [value],
+    )
+```
+
+**Post-filters** (`@register_post_filter`) run in Python on the result list after SQL:
+
+```python
+from matchbook.io.search import register_post_filter
+
+@register_post_filter("custom_check")
+def _custom(results, value, db_conn):
+    return [r for r in results if some_condition(r, value)]
+```
+
+#### Built-in SQL Filters
+
+| Filter name | Value type | Matches |
+|---|---|---|
+| `name_contains` | `str` | Series name substring (case-insensitive) |
+| `name_exact` | `str` | Exact series name |
+| `id_contains` | `str` | Series ID substring |
+| `module` | `str` | Exact module name |
+| `date_after` | `str` (ISO date) | Created at or after |
+| `date_before` | `str` (ISO date) | Created before |
+| `has_tag` | `str` | Series must have this tag |
+| `has_group` | `str` | Series has data in this group (e.g. `"fft"`) |
+| `has_name` | `str` | Series has a trace with this name |
+| `metadata_field` | `(field, op, val)` | JSON metadata field comparison (e.g. `("scan_count", ">=", 5)`) |
+| `text_search` | `str` | Broad search across id, name, and metadata JSON |
+
+#### Usage
+
+```python
+# Simple search
+results = db.search(name_contains="germanium")
+
+# Combined criteria (AND logic)
+results = db.search(has_group="fft", has_tag="thz_tds", date_after="2026-01-01")
+
+# Metadata field search
+results = db.search(metadata_field=("scan_count", ">=", 5))
+
+# Broad text search
+results = db.search(text_search="reference")
+```
+
+All filters compose via AND. Results include `id`, `name`, `module`, `created_at`, `tags`, and `metadata` dicts.
+
+Performance: Indexed columns — `series.name`, `series.created_at`, `data_blobs.grp`, `data_blobs.name`, `series_tags.tag`.
 
 ---
 
@@ -681,24 +754,19 @@ The adapter provides:
 
 Satisfies the `AnalysisModule` protocol. Declares:
 
-- **4 data groups:** Time Domain, FFT, Transfer Function, Optical Constants — with 20+ trace descriptors total.
-- **3 pipeline steps:**
-  - `load_data` — comparison workflow (loads from the analysis-comp data/ directory structure)
-  - `load_from_files` — registry-based loading (accepts arbitrary file paths)  
+- **5 data groups:** Raw/Compiled, Time Domain, FFT, Transfer Function, Optical Constants.
+- **2 pipeline steps:**
+  - `load_from_files` — registry-based loading (accepts arbitrary file paths, auto-groups)
   - `transfer_function` — computes H(f) from FFT data
 
 #### Step Functions
 
-**`step_load_data(ds, series_id, *, base_dir, person_name, sample_json)`**
-- Loads a person's complete dataset using the original `loaders.load_person()`.
-- Pushes every array into DataService: raw measurements, time domain, FFT, transfer function, optical constants.
-- Uses `_publish_dataset()` helper to atomise an `AnalysisDataset` into individual traces.
-
 **`step_load_from_files(ds, series_id, *, file_paths, grouping_keywords, grouping_delimiter)`**
 - Parses files via the loader registry (`get_loader_for_extension()`).
 - Runs `GroupingService` to pair samples with references.
-- Atomises each `THzData` into the DataService (raw compiled, mean time-domain, stderr).
-- Creates associations from grouping results.
+- Atomises each `THzData` into the DataService (raw compiled array, mean time-domain, stderr).
+- Creates associations from grouping results (substrate_reference, air_reference).
+- Stores per-file metadata (scan count, data type, filename).
 
 **`step_compute_transfer_function(ds, series_id, **params)`**
 - Reads FFT data from DataService.
@@ -718,13 +786,13 @@ Pure dataclasses — no framework imports:
 | `FFTData` | ref/sample frequency, amplitude, phase; optional deltas |
 | `OpticalConstants` | `frequency_thz`, `n`, `k`, `eps1`, `eps2`, `sigma_re`, `sigma_im` |
 | `SampleInfo` | `thickness_m`, `resistivity_ohm_m` |
-| `AnalysisDataset` | Complete dataset: name, sample_info, raw_ref, raw_sam, time_domain, fft, optical_constants |
+| `AnalysisDataset` | Complete dataset: name + all-optional fields (raw_ref, raw_sam, time_domain, fft, optical_constants, sample_info) |
 
 ### 8.4 Loaders (loaders.py)
 
 **File:** `matchbook/modules/thz/loaders.py`
 
-The original comparison-workflow loaders. Handles format variations across different analysis pipelines:
+Generic, format-agnostic THz data-file loaders. Handles format variations:
 - Tab- and space-delimited files
 - 1- or 2-row headers
 - Frequency in Hz or THz (auto-detected, normalised to THz)
@@ -736,12 +804,13 @@ The original comparison-workflow loaders. Handles format variations across diffe
 Key functions:
 | Function | Purpose |
 |---|---|
-| `load_raw_measurement(filepath)` | 2-column raw time-domain file |
+| `load_two_column(filepath)` | Any 2-column numeric file (alias: `load_raw_measurement`) |
 | `load_time_domain(filepath)` | Multi-column processed time-domain |
 | `load_fft(filepath)` | FFT output (amplitude, phase) |
 | `load_optical_constants(filepath)` | n, k, ε, σ values |
-| `load_person(name, dir, raw_ref, raw_sam, sample_info)` | Complete dataset for one person |
-| `discover_people(data_dir)` | Find all person subdirectories |
+| `discover_series(data_dir, exclude)` | Find series sub-directories (alias: `discover_people`) |
+| `load_series_folder(name, folder_path, raw_ref, raw_sam)` | Load all recognised files from a folder |
+| `load_directory(data_dir, exclude, raw_dir)` | Discover and load all series in a directory |
 
 ### 8.5 Analysis (analysis.py)
 
@@ -920,7 +989,7 @@ Has its own standalone `.acc` file loader (`_loaders.py`) for independence from 
 
 | Script | Purpose |
 |---|---|
-| `matchbook/scripts/run_thz.py` | Headless pipeline execution — loads all person data, runs pipeline, prints results. |
+| `matchbook/scripts/run_thz.py` | Full interactive workflow: load .acc files → auto-group → DataService → DB save/load → search/query. Drops into pdb. |
 | `matchbook/scripts/launch_gui.py` | Loads data + launches MatchbookApp with THz module. |
 
 Both scripts auto-discover the workspace root and add it to `sys.path`.
@@ -929,13 +998,13 @@ Both scripts auto-discover the workspace root and add it to `sys.path`.
 
 ## 12. Data Flow Walkthrough
 
-### Example: Loading data and running the pipeline (headless)
+### Example: Loading files and running the pipeline (headless)
 
 ```python
 from matchbook.core.data_service import DataKey, DataService
 from matchbook.core.registry import Registry
-from matchbook.modules.thz.adapter import THzModule
 from matchbook.io.database import Database
+from matchbook.modules.thz.adapter import THzModule
 
 # 1. Setup
 ds = DataService()
@@ -943,19 +1012,34 @@ registry = Registry(ds)
 registry.register(THzModule())
 pipeline = registry.get_pipeline("thz_tds")
 
-# 2. Configure and run
-pipeline.set_param("load_data", "base_dir", "/path/to/data")
-pipeline.set_param("load_data", "person_name", "sam")
-pipeline.set_param("load_data", "sample_json", "/path/to/sample_details.json")
-pipeline.run_all(ds, "sam")
+# 2. Load files via registry-based loader
+series_id = "germanium_test"
+pipeline.set_param("load_from_files", "file_paths",
+                   "reference_air_nitrogen.acc\nsample_germanium.acc")
+pipeline.run_all(ds, series_id)
 
-# 3. Read results
-entry = ds.get(DataKey("sam", "transfer_function", "amplitude"))
-print(entry.x[:5], entry.y[:5])  # frequency, |H(f)|
+# 3. Tag for later searching
+for sid in ds.list_series():
+    ds.tag_series(sid, "thz_tds")
+    ds.tag_series(sid, "germanium")
 
-# 4. Persist
+# 4. Inspect
+for sid in ds.list_series():
+    print(sid, ds.list_groups(sid))
+
+# 5. Persist
 db = Database("results.db")
-db.save_series(ds, "sam", module="thz_tds")
+for sid in ds.list_series():
+    db.save_series(ds, sid, module="thz_tds")
+
+# 6. Search
+results = db.search(text_search="germanium", has_group="time_domain")
+results = db.search(has_tag="thz_tds", date_after="2026-01-01")
+
+# 7. Reload from DB into a fresh DataService
+ds2 = DataService()
+for r in db.search():
+    db.load_series(r["id"], ds2)
 db.close()
 ```
 
@@ -979,12 +1063,12 @@ print(thz_data.y_mean[:5]) # averaged amplitude
 All data in the DataService follows the `(series_id, group, name)` triple:
 
 ```
-series_id = "chris"
+series_id = "germanium_test/reference_air_nitrogen.acc"
+├── group = "raw"
+│   └── name = "compiled"        → full compiled array (all scans)
 ├── group = "time_domain"
-│   ├── name = "orig_ref_amp"    → raw reference amplitude
-│   ├── name = "orig_sam_amp"    → raw sample amplitude
-│   ├── name = "win_ref_amp"     → windowed reference
-│   └── name = "win_sam_amp"     → windowed sample
+│   ├── name = "mean"            → averaged amplitude across scans
+│   └── name = "stderr"          → standard error
 ├── group = "fft"
 │   ├── name = "ref_amp"         → reference FFT amplitude
 │   ├── name = "sam_amp"         → sample FFT amplitude
@@ -993,11 +1077,16 @@ series_id = "chris"
 ├── group = "transfer_function"
 │   ├── name = "amplitude"       → |H(f)|
 │   └── name = "phase"           → Δφ(f)
-└── group = "optical_constants"
-    ├── name = "n"               → refractive index
-    ├── name = "k"               → extinction coefficient
-    ├── name = "eps1"            → real dielectric
-    ├── name = "eps2"            → imaginary dielectric
+├── group = "optical_constants"
+│   ├── name = "n"               → refractive index
+│   ├── name = "k"               → extinction coefficient
+│   ├── name = "eps1"            → real dielectric
+│   ├── name = "eps2"            → imaginary dielectric
+│   ├── name = "sigma_re"        → real conductivity
+│   └── name = "sigma_im"        → imaginary conductivity
+└── group = "_meta"
+    └── name = "grouping"        → filename-parsed metadata (data_type, series, temperature)
+```
     ├── name = "sigma_re"        → real conductivity
     └── name = "sigma_im"        → imaginary conductivity
 ```
@@ -1016,7 +1105,8 @@ matchbook/
 │   └── step_report.py        — Per-step diagnostic reporting skeleton
 │
 ├── io/
-│   ├── database.py           — SQLite persistence (save/load/sync/provenance)
+│   ├── database.py           — SQLite persistence (save/load/sync/search/provenance)
+│   ├── search.py             — Extensible search-filter registry (@register_filter)
 │   └── loaders/
 │       ├── __init__.py       — Auto-imports all loader modules
 │       ├── registry.py       — BaseLoader + @register_loader + get_loader_for_extension
@@ -1037,8 +1127,8 @@ matchbook/
 ├── modules/
 │   └── thz/
 │       ├── adapter.py        — Framework bridge (ONLY framework import point)
-│       ├── models.py         — THz data dataclasses
-│       ├── loaders.py        — Format-specific comparison-workflow parsers
+│       ├── models.py         — THz data dataclasses (all fields optional except name)
+│       ├── loaders.py        — Generic format-agnostic THz file parsers
 │       ├── analysis.py       — Pure analysis functions
 │       ├── containers.py     — THzData / BaseTHzData / TimeDomainStats
 │       └── example_data/     — Example .acc files for testing
@@ -1059,13 +1149,21 @@ matchbook/
 │       └── _loaders.py       — Standalone .acc loader
 │
 ├── scripts/
-│   ├── run_thz.py            — Headless pipeline script
+│   ├── run_thz.py            — Interactive workflow: load → group → persist → search → pdb
 │   └── launch_gui.py         — GUI launch script
 │
-└── docs/
-    └── wiki.md               — This document
+├── docs/
+│   └── wiki.md               — This document
+│
+legacy/                           — Original analysis‑comparison files (frozen reference)
+├── export.py
+├── gui.py
+├── loaders.py
+├── models.py
+├── run_comparisons.py
+└── sample_details.json
 ```
 
 ---
 
-*Last updated: Session in which wiki was created.*
+*Last updated: 2026-03-16 — Refactor: diverged from comparison workflow, generalised loaders, added search/query system, moved comparison artefacts to legacy/.*

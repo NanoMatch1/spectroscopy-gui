@@ -78,11 +78,15 @@ class SampleInfo:
 
 @dataclass
 class AnalysisDataset:
-    """Complete dataset for one analysis pipeline run."""
+    """Complete dataset for one analysis pipeline run.
+
+    Only *name* is required.  All other fields default to ``None``,
+    allowing the container to hold whatever data is available.
+    """
     name: str
-    sample_info: SampleInfo
-    raw_reference: RawMeasurement
-    raw_sample: RawMeasurement
+    raw_reference: Optional[RawMeasurement] = None
+    raw_sample: Optional[RawMeasurement] = None
     time_domain: Optional[TimeDomainData] = None
     fft: Optional[FFTData] = None
     optical_constants: Optional[OpticalConstants] = None
+    sample_info: Optional[SampleInfo] = None
