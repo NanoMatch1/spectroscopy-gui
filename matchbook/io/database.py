@@ -46,6 +46,28 @@ CREATE TABLE IF NOT EXISTS data_blobs (
     FOREIGN KEY (series_id) REFERENCES series(id)
 );
 
+CREATE TABLE IF NOT EXISTS associations (
+    source_id       TEXT NOT NULL,
+    relationship    TEXT NOT NULL,
+    target_id       TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    PRIMARY KEY (source_id, relationship),
+    FOREIGN KEY (source_id) REFERENCES series(id),
+    FOREIGN KEY (target_id) REFERENCES series(id)
+);
+
+CREATE TABLE IF NOT EXISTS provenance (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    series_id       TEXT NOT NULL,
+    step_id         TEXT NOT NULL,
+    timestamp       TEXT NOT NULL,
+    inputs_json     TEXT NOT NULL DEFAULT '[]',
+    params_json     TEXT NOT NULL DEFAULT '{}',
+    outputs_json    TEXT NOT NULL DEFAULT '[]',
+    note            TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (series_id) REFERENCES series(id)
+);
+
 CREATE TABLE IF NOT EXISTS pipeline_snapshots (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     series_id   TEXT NOT NULL,
@@ -103,6 +125,16 @@ class Database:
                 (series_id, tag),
             )
 
+        # Associations (source = this series)
+        self._conn.execute(
+            "DELETE FROM associations WHERE source_id = ?", (series_id,))
+        for sid, rel, target in data_service.list_associations(series_id):
+            self._conn.execute(
+                "INSERT INTO associations (source_id, relationship, target_id, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (sid, rel, target, now),
+            )
+
         # Data blobs
         self._conn.execute(
             "DELETE FROM data_blobs WHERE series_id = ?", (series_id,))
@@ -152,6 +184,14 @@ class Database:
         ).fetchall()
         for (tag,) in tag_rows:
             data_service.tag_series(series_id, tag)
+
+        # Associations
+        assoc_rows = self._conn.execute(
+            "SELECT relationship, target_id FROM associations WHERE source_id = ?",
+            (series_id,),
+        ).fetchall()
+        for rel, target in assoc_rows:
+            data_service.associate(series_id, rel, target)
 
         # Data blobs
         blob_rows = self._conn.execute(
@@ -216,6 +256,8 @@ class Database:
         """Remove a series and all its data from the database."""
         self._conn.execute("DELETE FROM data_blobs WHERE series_id = ?", (series_id,))
         self._conn.execute("DELETE FROM series_tags WHERE series_id = ?", (series_id,))
+        self._conn.execute("DELETE FROM associations WHERE source_id = ?", (series_id,))
+        self._conn.execute("DELETE FROM provenance WHERE series_id = ?", (series_id,))
         self._conn.execute("DELETE FROM pipeline_snapshots WHERE series_id = ?", (series_id,))
         self._conn.execute("DELETE FROM series WHERE id = ?", (series_id,))
         self._conn.commit()
@@ -262,3 +304,173 @@ class Database:
             {"id": r[0], "created_at": r[1], "label": r[2]}
             for r in rows
         ]
+
+    # -- Provenance --------------------------------------------------------
+
+    def record_provenance(
+        self,
+        series_id: str,
+        step_id: str,
+        inputs: list[str] | None = None,
+        params: dict[str, Any] | None = None,
+        outputs: list[str] | None = None,
+        note: str = "",
+    ) -> int:
+        """Record a provenance entry for a processing step.
+
+        Parameters
+        ----------
+        series_id:
+            The series being processed.
+        step_id:
+            Pipeline step identifier.
+        inputs:
+            List of DataKey descriptions or series IDs consumed.
+        params:
+            Parameter snapshot for this step execution.
+        outputs:
+            List of DataKey descriptions or series IDs produced.
+        note:
+            Optional human-readable annotation.
+
+        Returns the row id.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        cursor = self._conn.execute(
+            "INSERT INTO provenance "
+            "(series_id, step_id, timestamp, inputs_json, params_json, outputs_json, note) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                series_id,
+                step_id,
+                now,
+                json.dumps(inputs or []),
+                json.dumps(params or {}),
+                json.dumps(outputs or []),
+                note,
+            ),
+        )
+        self._conn.commit()
+        return cursor.lastrowid
+
+    def list_provenance(
+        self, series_id: str,
+    ) -> list[dict[str, Any]]:
+        """Return provenance records for a series, newest first."""
+        rows = self._conn.execute(
+            "SELECT id, step_id, timestamp, inputs_json, params_json, "
+            "outputs_json, note FROM provenance "
+            "WHERE series_id = ? ORDER BY timestamp DESC",
+            (series_id,),
+        ).fetchall()
+        return [
+            {
+                "id": r[0],
+                "step_id": r[1],
+                "timestamp": r[2],
+                "inputs": json.loads(r[3]),
+                "params": json.loads(r[4]),
+                "outputs": json.loads(r[5]),
+                "note": r[6],
+            }
+            for r in rows
+        ]
+
+    # -- Associations (direct DB access) -----------------------------------
+
+    def list_associations(
+        self, series_id: str | None = None,
+    ) -> list[dict[str, str]]:
+        """Return associations as dicts with source, relationship, target."""
+        if series_id:
+            rows = self._conn.execute(
+                "SELECT source_id, relationship, target_id FROM associations "
+                "WHERE source_id = ?", (series_id,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT source_id, relationship, target_id FROM associations"
+            ).fetchall()
+        return [
+            {"source": r[0], "relationship": r[1], "target": r[2]}
+            for r in rows
+        ]
+
+    # -- Dirty sync --------------------------------------------------------
+
+    def sync_dirty(self, data_service: DataService) -> int:
+        """Write only dirty entries and associations to the database.
+
+        Returns the number of entries written.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        count = 0
+
+        # Sync dirty data entries
+        for key_tuple in data_service.dirty_keys():
+            entry = data_service.get(DataKey(*key_tuple))
+            if entry is None:
+                continue
+
+            series_id = key_tuple[0]
+            # Ensure series row exists
+            self._conn.execute(
+                "INSERT OR IGNORE INTO series (id, name, module, created_at) "
+                "VALUES (?, ?, '', ?)",
+                (series_id, series_id, now),
+            )
+
+            try:
+                meta_str = json.dumps(entry.metadata)
+            except (TypeError, ValueError):
+                serializable = {
+                    k: v for k, v in entry.metadata.items()
+                    if isinstance(v, (str, int, float, bool, list, dict, type(None)))
+                }
+                meta_str = json.dumps(serializable)
+
+            self._conn.execute(
+                "INSERT OR REPLACE INTO data_blobs "
+                "(series_id, grp, name, x_blob, y_blob, metadata) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    entry.key.series_id,
+                    entry.key.group,
+                    entry.key.name,
+                    entry.x.tobytes(),
+                    entry.y.tobytes(),
+                    meta_str,
+                ),
+            )
+            count += 1
+
+        # Sync dirty associations
+        for assoc_key in data_service.dirty_associations():
+            sid, rel = assoc_key
+            target = data_service.get_association(sid, rel)
+            if target is not None:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO associations "
+                    "(source_id, relationship, target_id, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (sid, rel, target, now),
+                )
+
+        # Sync tags for affected series
+        affected_series = {k[0] for k in data_service.dirty_keys()}
+        for series_id in affected_series:
+            tags = data_service.get_tags(series_id)
+            self._conn.execute(
+                "DELETE FROM series_tags WHERE series_id = ?", (series_id,))
+            for tag in tags:
+                self._conn.execute(
+                    "INSERT INTO series_tags (series_id, tag) VALUES (?, ?)",
+                    (series_id, tag),
+                )
+
+        self._conn.commit()
+        data_service.mark_clean()
+
+        if count:
+            logger.info(f"Synced {count} dirty entries to database")
+        return count

@@ -70,12 +70,21 @@ DataListener = Callable[[str, DataKey], None]
 # ---------------------------------------------------------------------------
 
 class DataService:
-    """Central data store with observer notifications."""
+    """Central data store with observer notifications.
+
+    Tracks dirty state for database sync, and holds in-memory associations
+    (e.g. sample → reference pairing) that mirror the persistent DB layer.
+    """
 
     def __init__(self) -> None:
         self._store: dict[tuple[str, str, str], DataEntry] = {}
         self._listeners: list[DataListener] = []
         self._series_tags: dict[str, set[str]] = {}
+        self._dirty: set[tuple[str, str, str]] = set()
+        # Associations: (series_id, relationship) → target series_id
+        # e.g. ("sample_Ge_300K", "reference") → "reference_Ge_300K"
+        self._associations: dict[tuple[str, str], str] = {}
+        self._dirty_associations: set[tuple[str, str]] = set()
 
     # -- write -----------------------------------------------------------------
 
@@ -83,6 +92,7 @@ class DataService:
         """Insert or update a data entry and notify listeners."""
         key_tuple = (entry.key.series_id, entry.key.group, entry.key.name)
         self._store[key_tuple] = entry
+        self._dirty.add(key_tuple)
         self._notify("put", entry.key)
 
     def remove(self, key: DataKey) -> None:
@@ -90,6 +100,7 @@ class DataService:
         key_tuple = (key.series_id, key.group, key.name)
         if key_tuple in self._store:
             del self._store[key_tuple]
+            self._dirty.discard(key_tuple)
             self._notify("remove", key)
 
     def clear_series(self, series_id: str) -> None:
@@ -97,7 +108,13 @@ class DataService:
         to_remove = [k for k in self._store if k[0] == series_id]
         for k in to_remove:
             del self._store[k]
+            self._dirty.discard(k)
             self._notify("clear", DataKey(*k))
+        # Clear associations where this series is the source
+        assoc_keys = [ak for ak in self._associations if ak[0] == series_id]
+        for ak in assoc_keys:
+            del self._associations[ak]
+            self._dirty_associations.discard(ak)
 
     # -- read ------------------------------------------------------------------
 
@@ -181,3 +198,60 @@ class DataService:
     def _notify(self, event: str, key: DataKey) -> None:
         for fn in self._listeners:
             fn(event, key)
+
+    # -- associations ----------------------------------------------------------
+
+    def associate(
+        self, series_id: str, relationship: str, target_series_id: str,
+    ) -> None:
+        """Create a named link between two series.
+
+        Example::
+
+            ds.associate("sample_Ge_300K", "reference", "ref_Ge_300K")
+            ds.get_association("sample_Ge_300K", "reference")
+            # → "ref_Ge_300K"
+        """
+        key = (series_id, relationship)
+        self._associations[key] = target_series_id
+        self._dirty_associations.add(key)
+
+    def remove_association(self, series_id: str, relationship: str) -> None:
+        """Remove an association if it exists."""
+        key = (series_id, relationship)
+        self._associations.pop(key, None)
+        self._dirty_associations.discard(key)
+
+    def get_association(self, series_id: str, relationship: str) -> str | None:
+        """Return the target series for the given relationship, or None."""
+        return self._associations.get((series_id, relationship))
+
+    def list_associations(
+        self, series_id: str | None = None,
+    ) -> list[tuple[str, str, str]]:
+        """Return associations as (series_id, relationship, target) tuples."""
+        results = []
+        for (sid, rel), target in self._associations.items():
+            if series_id is not None and sid != series_id:
+                continue
+            results.append((sid, rel, target))
+        return results
+
+    # -- dirty tracking --------------------------------------------------------
+
+    def dirty_keys(self) -> set[tuple[str, str, str]]:
+        """Return data entry keys that were modified since last mark_clean."""
+        return set(self._dirty)
+
+    def dirty_associations(self) -> set[tuple[str, str]]:
+        """Return association keys modified since last mark_clean."""
+        return set(self._dirty_associations)
+
+    def is_dirty(self) -> bool:
+        """True if any entries or associations have been modified."""
+        return bool(self._dirty or self._dirty_associations)
+
+    def mark_clean(self) -> None:
+        """Clear all dirty flags (called after database sync)."""
+        self._dirty.clear()
+        self._dirty_associations.clear()

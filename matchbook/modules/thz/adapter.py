@@ -28,6 +28,11 @@ from matchbook.core.pipeline import PipelineStep
 from matchbook.modules.thz import analysis, loaders
 from matchbook.modules.thz.models import AnalysisDataset
 
+# New infrastructure imports
+from matchbook.io.loaders.registry import get_loader_for_extension, LoaderError
+from matchbook.modules.thz.containers import THzData
+from matchbook.services.grouping import GroupingService
+
 logger = logging.getLogger(__name__)
 
 
@@ -203,6 +208,115 @@ def _publish_dataset(
                         xl_freq, ylabel, ylabel)
 
 
+# ---------------------------------------------------------------------------
+# Registry-based file loading
+# ---------------------------------------------------------------------------
+
+def step_load_from_files(
+    data_service: DataService,
+    series_id: str,
+    *,
+    file_paths: list[str] | str = "",
+    grouping_keywords: list[str] | None = None,
+    grouping_delimiter: str = "_",
+) -> None:
+    """Load THz data files via the loader registry and auto-group them.
+
+    Accepts a list of file paths (or a single newline-separated string).
+    Uses the loader registry to parse each file, then runs GroupingService
+    to pair samples with references.  Associations are stored in the
+    DataService.
+    """
+    if isinstance(file_paths, str):
+        file_paths = [p.strip() for p in file_paths.splitlines() if p.strip()]
+    if not file_paths:
+        return
+
+    # Ensure loader modules are imported (triggers @register_loader)
+    import matchbook.io.loaders  # noqa: F401
+
+    loaded: dict[str, THzData] = {}
+    for fpath in file_paths:
+        ext = os.path.splitext(fpath)[1]
+        try:
+            loader_cls = get_loader_for_extension(ext)
+        except LoaderError:
+            logger.warning(f"No loader for {ext}, skipping: {fpath}")
+            continue
+        loader = loader_cls(fpath)
+        result = loader.load()
+        if isinstance(result, THzData):
+            loaded[os.path.basename(fpath)] = result
+
+    if not loaded:
+        return
+
+    # Group files by filename conventions
+    gs = GroupingService(
+        keywords=grouping_keywords or ["type", "series", "temp"],
+        delimiter=grouping_delimiter,
+        filelist=list(loaded.keys()),
+    )
+    gs.simple_grouping(delimiter=grouping_delimiter, keywords=gs.keywords)
+
+    # Atomise each loaded file into the DataService
+    for filename, thz_obj in loaded.items():
+        file_series = f"{series_id}/{filename}"
+
+        # Store raw compiled array
+        if thz_obj.raw_data is not None:
+            data_service.put(DataEntry(
+                key=DataKey(file_series, "raw", "compiled"),
+                x=thz_obj.raw_data[:, 0],
+                y=thz_obj.raw_data[:, 1] if thz_obj.raw_data.shape[1] > 1 else thz_obj.raw_data[:, 0],
+                metadata={
+                    "n_scans": len(thz_obj.data_list),
+                    "filename": filename,
+                    "data_type": thz_obj.data_type,
+                    "full_raw_shape": list(thz_obj.raw_data.shape),
+                },
+            ))
+
+        # Store averaged time-domain data
+        if thz_obj.data is not None:
+            _put_xy(
+                data_service, file_series,
+                "time_domain", "mean",
+                thz_obj.time, thz_obj.y_mean,
+                "Time (ps)", "Amplitude (a.u.)", filename,
+            )
+            if thz_obj.y_err is not None:
+                _put_xy(
+                    data_service, file_series,
+                    "time_domain", "stderr",
+                    thz_obj.time, thz_obj.y_err,
+                    "Time (ps)", "Std Error", f"{filename} stderr",
+                )
+
+        # Record file-level metadata
+        info = gs(filename)
+        if info is not None:
+            data_service.put(DataEntry(
+                key=DataKey(file_series, "_meta", "grouping"),
+                x=np.array([0.0]), y=np.array([0.0]),
+                metadata={
+                    "data_type": info.data_type,
+                    "series": info.series,
+                    "temperature": info.temperature,
+                },
+            ))
+
+    # Create associations from grouping results
+    for filename, info in gs.file_items.items():
+        file_series = f"{series_id}/{filename}"
+        if info.substrate_reference:
+            ref_series = f"{series_id}/{info.substrate_reference}"
+            data_service.associate(file_series, "substrate_reference", ref_series)
+        if info.air_reference:
+            air_series = f"{series_id}/{info.air_reference}"
+            data_service.associate(file_series, "air_reference", air_series)
+
+
 def step_compute_transfer_function(
     data_service: DataService,
     series_id: str,
@@ -350,7 +464,7 @@ class THzModule:
         return [
             PipelineStepDescriptor(
                 id="load_data",
-                name="Load Data",
+                name="Load Data (comparison)",
                 params=[
                     ParameterDescriptor("base_dir", "Data directory",
                                         ParamType.FILE_PATH, ""),
@@ -358,6 +472,18 @@ class THzModule:
                                         ParamType.STRING, ""),
                     ParameterDescriptor("sample_json", "Sample details JSON",
                                         ParamType.FILE_PATH, ""),
+                ],
+            ),
+            PipelineStepDescriptor(
+                id="load_from_files",
+                name="Load Data (files)",
+                params=[
+                    ParameterDescriptor("file_paths", "File paths (one per line)",
+                                        ParamType.STRING, ""),
+                    ParameterDescriptor("grouping_keywords", "Grouping keywords",
+                                        ParamType.STRING, "type,series,temp"),
+                    ParameterDescriptor("grouping_delimiter", "Filename delimiter",
+                                        ParamType.STRING, "_"),
                 ],
             ),
             PipelineStepDescriptor(
@@ -373,10 +499,17 @@ class THzModule:
         return [
             PipelineStep(
                 id="load_data",
-                name="Load Data",
+                name="Load Data (comparison)",
                 fn=step_load_data,
                 params=_defaults_from(descriptors["load_data"]),
                 param_descriptors=descriptors["load_data"].params,
+            ),
+            PipelineStep(
+                id="load_from_files",
+                name="Load Data (files)",
+                fn=step_load_from_files,
+                params=_defaults_from(descriptors["load_from_files"]),
+                param_descriptors=descriptors["load_from_files"].params,
             ),
             PipelineStep(
                 id="transfer_function",
