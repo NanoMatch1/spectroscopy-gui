@@ -30,6 +30,7 @@ from matchbook.io.loaders.registry import get_loader_for_extension
 from matchbook.modules.thz.adapter import THzModule, step_load_from_files
 from matchbook.modules.thz.containers import THzData
 from matchbook.services.grouping import GroupingService
+from matchbook.services.grouping_step import step_group_files
 import matchbook.io.loaders  # trigger @register_loader
 
 
@@ -349,13 +350,16 @@ def test_sync_dirty(ref_data, sam_data):
 
 
 def test_step_load_from_files():
-    """Test 6: step_load_from_files — the adapter's registry-based loading."""
-    print("\n=== Test 6: step_load_from_files (adapter) ===")
+    """Test 6: step_load_from_files + step_group_files — load then group."""
+    print("\n=== Test 6: step_load_from_files + step_group_files ===")
 
     ds = DataService()
     step_load_from_files(
         ds, "integration_test",
         file_paths=[REF_FILE, SAM_FILE],
+    )
+    step_group_files(
+        ds, "integration_test",
         grouping_keywords=["type", "series", "temp"],
         grouping_delimiter="_",
     )
@@ -402,13 +406,13 @@ def test_module_registration():
     check("Module registered", record is not None)
     check("Module name = 'thz_tds'", record.name == "thz_tds")
     check("5 data groups", len(record.data_groups) == 5)
-    check("2 pipeline steps", len(record.pipeline_step_descriptors) == 2)
+    check("3 pipeline steps", len(record.pipeline_step_descriptors) == 3)
 
     pipeline = registry.get_pipeline("thz_tds")
-    check("Pipeline has 2 steps", len(pipeline.steps) == 2)
+    check("Pipeline has 3 steps", len(pipeline.steps) == 3)
     step_ids = pipeline.step_ids
     check("Step IDs correct",
-          step_ids == ["load_from_files", "transfer_function"])
+          step_ids == ["load_from_files", "group_files", "transfer_function"])
 
     all_groups = registry.all_data_groups
     check(f"all_data_groups returns {len(all_groups)} groups",

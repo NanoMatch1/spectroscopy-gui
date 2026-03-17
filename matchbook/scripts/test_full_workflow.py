@@ -59,6 +59,7 @@ from matchbook.modules.thz.adapter import (
 )
 from matchbook.modules.thz.containers import THzData
 from matchbook.services.grouping import GroupingService
+from matchbook.services.grouping_step import step_group_files
 import matchbook.io.loaders  # trigger @register_loader
 
 
@@ -124,16 +125,20 @@ def phase_1_setup():
 
     # Pipeline
     steps = record.pipeline_step_descriptors
-    check("2 pipeline step descriptors", len(steps) == 2)
+    check("3 pipeline step descriptors", len(steps) == 3)
     check("Step IDs",
-          [s.id for s in steps] == ["load_from_files", "transfer_function"])
-    check("transfer_function depends on load_from_files",
+          [s.id for s in steps] == ["load_from_files", "group_files",
+                                    "transfer_function"])
+    check("group_files depends on load_from_files",
           "load_from_files" in steps[1].depends_on)
+    check("transfer_function depends on group_files",
+          "group_files" in steps[2].depends_on)
 
     # Pipeline object
     pipeline = registry.get_pipeline("thz_tds")
-    check("Pipeline has 2 steps", len(pipeline.steps) == 2)
+    check("Pipeline has 3 steps", len(pipeline.steps) == 3)
     check("Pipeline step_ids", pipeline.step_ids == ["load_from_files",
+                                                      "group_files",
                                                       "transfer_function"])
 
     # Registry aggregation
@@ -170,11 +175,15 @@ def phase_2_pipeline_load(ds, registry, pipeline):
 
     pipeline.unsubscribe(listener)
 
-    check("Pipeline emitted events", len(events) >= 4)
+    check("Pipeline emitted events", len(events) >= 6)
     check("step_start for load_from_files",
           ("step_start", "load_from_files") in events)
     check("step_done for load_from_files",
           ("step_done", "load_from_files") in events)
+    check("step_start for group_files",
+          ("step_start", "group_files") in events)
+    check("step_done for group_files",
+          ("step_done", "group_files") in events)
     check("step_start for transfer_function",
           ("step_start", "transfer_function") in events)
     check("step_done for transfer_function",
@@ -268,18 +277,18 @@ def phase_4_pipeline_state(ds, pipeline, series_id):
     check("History length >= 1", pipeline.history_length >= 1)
 
     # Change a param → staleness
-    old_delim = pipeline.get_params("load_from_files")["grouping_delimiter"]
-    pipeline.set_param("load_from_files", "grouping_delimiter", "-")
-    check("load_from_files now stale", pipeline.is_stale("load_from_files"))
+    old_delim = pipeline.get_params("group_files")["grouping_delimiter"]
+    pipeline.set_param("group_files", "grouping_delimiter", "-")
+    check("group_files now stale", pipeline.is_stale("group_files"))
 
     # downstream_of
     downstream = pipeline.downstream_of("load_from_files")
-    check("downstream_of includes both steps",
-          downstream == ["load_from_files", "transfer_function"])
+    check("downstream_of includes all steps",
+          downstream == ["load_from_files", "group_files", "transfer_function"])
 
     # Rewind to restore original params
     pipeline.rewind(0)
-    restored = pipeline.get_params("load_from_files")["grouping_delimiter"]
+    restored = pipeline.get_params("group_files")["grouping_delimiter"]
     check("Rewind restored delimiter",
           restored == old_delim,
           f"expected '{old_delim}', got '{restored}'")

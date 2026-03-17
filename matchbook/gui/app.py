@@ -37,7 +37,6 @@ class MatchbookApp:
         ds = DataService()
         registry = Registry(ds)
         registry.register(some_module)
-        # ... load data into ds ...
 
         app = MatchbookApp(ds, registry)
         app.run()
@@ -48,9 +47,11 @@ class MatchbookApp:
         data_service: DataService,
         registry: Registry,
         title: str = "Matchbook Analysis",
+        database: Any | None = None,
     ) -> None:
         self._data_service = data_service
         self._registry = registry
+        self._database = database
 
         # -- Root window -----------------------------------------------
         self.root = tk.Tk()
@@ -124,10 +125,12 @@ class MatchbookApp:
     # -----------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        # Far left: file panel
+        # Far left: file panel (collapsible, with optional database section)
         self._file_panel = FilePanel(
             self.root,
             on_load_requested=self._on_files_loaded,
+            on_db_search_requested=self._on_db_search,
+            on_db_load_requested=self._on_db_load,
         )
 
         # Left: sidebar
@@ -288,7 +291,7 @@ class MatchbookApp:
         """Called by FilePanel after files are successfully ingested.
 
         Pushes paths into the pipeline's load_from_files params and runs
-        the load step for a series derived from the set of filenames.
+        the full pipeline (load → group → downstream steps).
         """
         if self._active_pipeline is None:
             return
@@ -302,37 +305,41 @@ class MatchbookApp:
         common_dir = os.path.commonpath(file_paths) if file_paths else ""
         series_id = os.path.basename(common_dir) or "loaded"
 
-        # Push file paths into the load step and run it
+        # Push file paths into the load step and run the full pipeline
         self._active_pipeline.set_param(
             "load_from_files", "file_paths", path_str)
         self._active_pipeline.run_from(
             "load_from_files", self._data_service, series_id)
 
-        # Build grouping summary for the file panel
-        grouping_lines: list[str] = []
-        for sid in sorted(self._data_service.list_series()):
-            if not sid.startswith(series_id + "/"):
-                continue
-            meta = self._data_service.get(
-                DataKey(sid, "_meta", "grouping"))
-            if meta is not None:
-                dtype = meta.metadata.get("data_type", "?")
-                series_name = meta.metadata.get("series", "")
-                fname = sid.rsplit("/", 1)[-1]
-                grouping_lines.append(f"{fname}: {dtype} ({series_name})")
-
-            # Show associations
-            for src, rel, tgt in self._data_service.list_associations(sid):
-                s_name = src.rsplit("/", 1)[-1]
-                t_name = tgt.rsplit("/", 1)[-1]
-                grouping_lines.append(f"  {s_name} \u2192 {rel} \u2192 {t_name}")
-
-        if grouping_lines:
-            self._file_panel.show_grouping_results("\n".join(grouping_lines))
-
         # Refresh pipeline view
         if self._pipeline_view is not None:
             self._pipeline_view.refresh()
+        self._schedule_redraw()
+
+    # -----------------------------------------------------------------
+    # Database callbacks
+    # -----------------------------------------------------------------
+
+    def _on_db_search(self, query_text: str) -> None:
+        """Search the database and show results in the file panel."""
+        if self._database is None:
+            self._file_panel.show_db_results([])
+            return
+
+        criteria: dict[str, str] = {}
+        if query_text:
+            criteria["text_search"] = query_text
+        results = self._database.search(**criteria)
+        self._file_panel.show_db_results(results)
+
+    def _on_db_load(self, series_ids: list[str]) -> None:
+        """Load selected series from the database into the DataService."""
+        if self._database is None:
+            return
+
+        for sid in series_ids:
+            self._database.load_series(sid, self._data_service)
+
         self._schedule_redraw()
 
     # -----------------------------------------------------------------

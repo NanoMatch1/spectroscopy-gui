@@ -30,7 +30,10 @@ from matchbook.modules.thz.models import AnalysisDataset
 from matchbook.io.file_ingestor import FileIngestor, IngestedFile
 from matchbook.io.recognisers import register_atomiser, register_recogniser
 from matchbook.modules.thz.containers import THzData
-from matchbook.services.grouping import GroupingService
+from matchbook.services.grouping_step import (
+    create_grouping_step,
+    grouping_step_descriptor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -131,15 +134,12 @@ def step_load_from_files(
     series_id: str,
     *,
     file_paths: list[str] | str = "",
-    grouping_keywords: list[str] | None = None,
-    grouping_delimiter: str = "_",
 ) -> None:
-    """Load THz data files via the FileIngestor and auto-group them.
+    """Load THz data files via the FileIngestor.
 
     Accepts a list of file paths (or a single newline-separated string).
-    Uses the FileIngestor to parse each file, then runs GroupingService
-    to pair samples with references.  Associations are stored in the
-    DataService.
+    Uses the FileIngestor to parse each file, then atomises the results
+    into the DataService.  Grouping is handled by a separate pipeline step.
     """
     if isinstance(file_paths, str):
         file_paths = [p.strip() for p in file_paths.splitlines() if p.strip()]
@@ -162,41 +162,9 @@ def step_load_from_files(
     if not loaded:
         return
 
-    # --- Generic: group by filename conventions ---
-    gs = GroupingService(
-        keywords=grouping_keywords or ["type", "series", "temp"],
-        delimiter=grouping_delimiter,
-        filelist=list(loaded.keys()),
-    )
-    gs.simple_grouping(delimiter=grouping_delimiter, keywords=gs.keywords)
-
     # --- Module-specific: atomise each file ---
     for filename, ingested in loaded.items():
         atomise_thz(ingested, data_service, series_id)
-
-        # Record file-level metadata from grouping
-        file_series = f"{series_id}/{filename}"
-        info = gs(filename)
-        if info is not None:
-            data_service.put(DataEntry(
-                key=DataKey(file_series, "_meta", "grouping"),
-                x=np.array([0.0]), y=np.array([0.0]),
-                metadata={
-                    "data_type": info.data_type,
-                    "series": info.series,
-                    "temperature": info.temperature,
-                },
-            ))
-
-    # Create associations from grouping results
-    for filename, info in gs.file_items.items():
-        file_series = f"{series_id}/{filename}"
-        if info.substrate_reference:
-            ref_series = f"{series_id}/{info.substrate_reference}"
-            data_service.associate(file_series, "substrate_reference", ref_series)
-        if info.air_reference:
-            air_series = f"{series_id}/{info.air_reference}"
-            data_service.associate(file_series, "air_reference", air_series)
 
 
 def step_compute_transfer_function(
@@ -349,16 +317,13 @@ class THzModule:
                 params=[
                     ParameterDescriptor("file_paths", "File paths (one per line)",
                                         ParamType.STRING, ""),
-                    ParameterDescriptor("grouping_keywords", "Grouping keywords",
-                                        ParamType.STRING, "type,series,temp"),
-                    ParameterDescriptor("grouping_delimiter", "Filename delimiter",
-                                        ParamType.STRING, "_"),
                 ],
             ),
+            grouping_step_descriptor(depends_on=["load_from_files"]),
             PipelineStepDescriptor(
                 id="transfer_function",
                 name="Compute Transfer Function",
-                depends_on=["load_from_files"],
+                depends_on=["group_files"],
             ),
         ]
 
@@ -373,13 +338,14 @@ class THzModule:
                 params=_defaults_from(descriptors["load_from_files"]),
                 param_descriptors=descriptors["load_from_files"].params,
             ),
+            create_grouping_step(depends_on=["load_from_files"]),
             PipelineStep(
                 id="transfer_function",
                 name="Compute Transfer Function",
                 fn=step_compute_transfer_function,
                 params=_defaults_from(descriptors["transfer_function"]),
                 param_descriptors=descriptors["transfer_function"].params,
-                depends_on=["load_from_files"],
+                depends_on=["group_files"],
             ),
         ]
 

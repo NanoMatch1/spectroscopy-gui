@@ -1,9 +1,9 @@
 """Launch the Matchbook GUI with the THz TDS module.
 
 This script:
-  1. Creates a DataService and Registry.
+  1. Creates a DataService, Database, and Registry.
   2. Registers the THz module.
-  3. Opens the GUI.
+  3. Opens the GUI with database access.
 """
 
 from __future__ import annotations
@@ -20,7 +20,11 @@ if _WORKSPACE not in sys.path:
 from matchbook.core.data_service import DataService
 from matchbook.core.registry import Registry
 from matchbook.gui.app import MatchbookApp
+from matchbook.io.database import Database
 from matchbook.modules.thz.adapter import THzModule
+
+
+_DEFAULT_DB = os.path.join(_WORKSPACE, "matchbook_data.db")
 
 
 def main() -> None:
@@ -33,8 +37,15 @@ def main() -> None:
     thz_module = THzModule()
     registry.register(thz_module)
 
+    # --- Database ---
+    db = Database(_DEFAULT_DB)
+
     # --- Launch GUI ---
-    app = MatchbookApp(data_service, registry, title="Matchbook — THz TDS")
+    app = MatchbookApp(
+        data_service, registry,
+        title="Matchbook — THz TDS",
+        database=db,
+    )
     app.run()
 
 
