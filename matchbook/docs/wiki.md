@@ -23,6 +23,8 @@
    - 5.1 [Registry Mechanism](#51-registry-mechanism)
    - 5.2 [BaseLoader Interface](#52-baseloader-interface)
    - 5.3 [Registered Loaders](#53-registered-loaders)
+   - 5.4 [FileIngestor](#54-fileingestor)
+   - 5.5 [Recogniser & Atomiser Registries](#55-recogniser--atomiser-registries)
 6. [Services](#6-services)
    - 6.1 [GroupingService](#61-groupingservice)
    - 6.2 [FilenameInfo](#62-filenameinfo)
@@ -596,6 +598,141 @@ The `.acc` format is the primary raw acquisition format. File structure:
 - `%%` separates individual scans.
 - Data rows are space-separated `[time, amplitude]` pairs.
 - Each scan becomes a `BaseTHzData` object; the collection becomes `THzData`.
+
+### 5.4 FileIngestor
+
+**File:** `matchbook/io/file_ingestor.py`
+
+A generic file-loading layer that wraps the Loader Registry. The FileIngestor is **module-agnostic** — it knows nothing about THz, UV-VIS, or any specific data domain. It takes file paths, runs the appropriate loader for each extension, and returns structured `IngestedFile` results.
+
+#### IngestedFile
+
+```python
+@dataclass
+class IngestedFile:
+    path: str           # absolute path to source file
+    filename: str       # basename, e.g. "sam_Si_300K.txt"
+    extension: str      # lowercase with dot, e.g. ".txt"
+    data: Any           # parsed object from loader (THzData, Spectrum, etc.)
+    loader_name: str    # class name that handled this file
+    load_error: str     # error message if loading failed
+
+    @property
+    def ok(self) -> bool:
+        """True when loaded without error."""
+```
+
+#### IngestReport
+
+```python
+@dataclass
+class IngestReport:
+    files: list[IngestedFile]
+
+    @property
+    def succeeded(self) -> list[IngestedFile]: ...
+
+    @property
+    def failed(self) -> list[IngestedFile]: ...
+```
+
+#### Usage Example
+
+```python
+import matchbook.io.loaders                       # trigger @register_loader
+from matchbook.io.file_ingestor import FileIngestor
+
+ingestor = FileIngestor()
+report = ingestor.load_files([
+    "/data/reference_air.acc",
+    "/data/sample_Si_300K.acc",
+    "/data/unknown.xyz",                           # no loader → graceful failure
+])
+
+print(f"Loaded {len(report.succeeded)}/{len(report)} files")
+# Loaded 2/3 files
+
+for ing in report.succeeded:
+    print(f"  {ing.filename}: {type(ing.data).__name__} via {ing.loader_name}")
+    #  reference_air.acc: THzData via ACCLoader
+    #  sample_Si_300K.acc: THzData via ACCLoader
+
+for ing in report.failed:
+    print(f"  FAILED {ing.filename}: {ing.load_error}")
+    #  FAILED unknown.xyz: No loader registered for extension '.xyz'. Available: [...]
+```
+
+#### Integration with Recognisers
+
+After loading, modules can identify their data via the recogniser registry:
+
+```python
+from matchbook.io.recognisers import recognise, get_atomiser
+
+for ingested in report.succeeded:
+    matches = recognise(ingested)          # [(module_name, confidence), ...]
+    if matches:
+        module_name, _confidence = matches[0]
+        atomiser = get_atomiser(module_name)
+        atomiser(ingested, data_service, series_id)
+```
+
+### 5.5 Recogniser & Atomiser Registries
+
+**File:** `matchbook/io/recognisers.py`
+
+Two parallel registries that let modules claim and process loaded files without the loader infrastructure knowing about them.
+
+#### Recogniser
+
+A **recogniser** is a callable that scores how confidently a module can handle a given `IngestedFile`. Returns a float in `[0.0, 1.0]`.
+
+```python
+from matchbook.io.recognisers import register_recogniser
+
+@register_recogniser("thz_tds")
+def recognise_thz(ingested: IngestedFile) -> float:
+    from matchbook.modules.thz.containers import THzData
+    return 1.0 if isinstance(ingested.data, THzData) else 0.0
+```
+
+#### Atomiser
+
+An **atomiser** writes an `IngestedFile`'s data into the `DataService`, following the module's own data model.
+
+```python
+from matchbook.io.recognisers import register_atomiser
+
+@register_atomiser("thz_tds")
+def atomise_thz(
+    ingested: IngestedFile,
+    data_service: DataService,
+    series_id: str,
+) -> None:
+    thz_obj = ingested.data
+    filename = ingested.filename
+    file_series = f"{series_id}/{filename}"
+    # ... write DataEntry objects into data_service ...
+```
+
+#### Lookup Functions
+
+| Function | Returns | Purpose |
+|---|---|---|
+| `recognise(ingested)` | `list[(module_name, confidence)]` | Score all recognisers, sorted by confidence descending |
+| `get_atomiser(module_name)` | `AtomiserFn` | Get the registered atomiser for a module |
+| `registered_recognisers()` | `dict[str, RecogniserFn]` | Snapshot of all recognisers |
+| `registered_atomisers()` | `dict[str, AtomiserFn]` | Snapshot of all atomisers |
+
+#### Design
+
+The separation into three layers (FileIngestor → Recogniser → Atomiser) means:
+
+1. **FileIngestor** handles generic file I/O — no domain knowledge needed.
+2. **Recognisers** classify what module should handle each file — type-checking only.
+3. **Atomisers** transform parsed data into DataService entries — module-specific.
+
+New modules register their own recogniser + atomiser at import time. The pipeline step in the adapter becomes a thin orchestrator that calls these three layers in sequence.
 
 ---
 

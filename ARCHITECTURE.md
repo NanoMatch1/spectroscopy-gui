@@ -274,12 +274,13 @@ class Pipeline:
         if self._order:
             self.run_from(self._order[0], data_service, series_id)
 
-    def invalidate_from(self, step_id: str) -> list[str]:
-        """Return step_id and all downstream steps that would re-run."""
+    def downstream_of(self, step_id: str) -> list[str]:
+        """Return *step_id* and every step after it in execution order."""
         idx = self._order.index(step_id)
         return self._order[idx:]
 
     def get_cache(self, step_id: str) -> StepResult | None:
+        """Return the cached result for *step_id*, or ``None``."""
         return self._cache.get(step_id)
 
     def rewind(self, history_index: int) -> None:
@@ -553,20 +554,18 @@ This is the critical interaction protocol. Here's the full lifecycle:
 Here is what the THz module would look like. This is the **entire integration surface** — everything else in the module is internal:
 
 ```python
-# modules/thz/module.py
-from core.module_base import (
-    ModuleBase, ModuleContext,
+# modules/thz/adapter.py  (complete module façade — only framework import point)
+from matchbook.core.module_base import (
     DataGroupDescriptor, TraceDescriptor,
     PipelineStepDescriptor, ParameterDescriptor, ParamType,
 )
-from core.pipeline import PipelineStep
-from modules.thz.analysis import (
-    step_load_raw, step_window, step_fft,
-    step_transfer_function, step_optical_constants,
+from matchbook.core.pipeline import PipelineStep
+from matchbook.modules.thz.adapter import (
+    step_load_from_files, step_compute_transfer_function,
 )
 
 
-class THzModule(ModuleBase):
+class THzModule:  # satisfies AnalysisModule protocol structurally
 
     @property
     def name(self) -> str:
@@ -576,21 +575,32 @@ class THzModule(ModuleBase):
     def display_name(self) -> str:
         return "THz Time-Domain Spectroscopy"
 
-    def get_data_groups(self) -> list[DataGroupDescriptor]:
+    def data_groups(self) -> list[DataGroupDescriptor]:
         return [
             DataGroupDescriptor(
-                key="time_domain", label="Time Domain",
+                key="raw", label="Raw / Compiled",
                 x_label="Time (ps)", order=0,
                 traces=[
-                    TraceDescriptor("td_orig_ref",  "Original reference",     "time_domain", "orig_ref_amp",     y_label="Amplitude (V)"),
-                    TraceDescriptor("td_orig_sam",  "Original sample",        "time_domain", "orig_sam_amp",     y_label="Amplitude (V)"),
-                    TraceDescriptor("td_win_ref",   "Windowed reference",     "time_domain", "win_ref_amp",      y_label="Amplitude (V)", default_visible=True),
-                    TraceDescriptor("td_win_sam",   "Windowed sample",        "time_domain", "win_sam_amp",      y_label="Amplitude (V)", default_visible=True),
+                    TraceDescriptor("raw_compiled", "Compiled scan",
+                                    "raw", "compiled",
+                                    y_label="Amplitude (a.u.)", default_visible=True),
+                ],
+            ),
+            DataGroupDescriptor(
+                key="time_domain", label="Time Domain",
+                x_label="Time (ps)", order=1,
+                traces=[
+                    TraceDescriptor("td_mean", "Mean amplitude",
+                                    "time_domain", "mean",
+                                    y_label="Amplitude (a.u.)", default_visible=True),
+                    TraceDescriptor("td_stderr", "Std error",
+                                    "time_domain", "stderr",
+                                    y_label="Std Error"),
                 ],
             ),
             DataGroupDescriptor(
                 key="fft", label="FFT",
-                x_label="Frequency (THz)", order=1,
+                x_label="Frequency (THz)", order=2,
                 traces=[
                     TraceDescriptor("fft_ref_amp",   "Reference amplitude",  "fft", "ref_amp",   y_label="Amplitude", default_visible=True),
                     TraceDescriptor("fft_sam_amp",   "Sample amplitude",     "fft", "sam_amp",   y_label="Amplitude", default_visible=True),
@@ -600,7 +610,7 @@ class THzModule(ModuleBase):
             ),
             DataGroupDescriptor(
                 key="transfer_function", label="Transfer Function",
-                x_label="Frequency (THz)", order=2,
+                x_label="Frequency (THz)", order=3,
                 traces=[
                     TraceDescriptor("tf_amp",   "|H(f)| amplitude",  "transfer_function", "amplitude", y_label="|H(f)|",  default_visible=True),
                     TraceDescriptor("tf_phase", "Phase difference",  "transfer_function", "phase",     y_label="Δφ (rad)", default_visible=True),
@@ -608,7 +618,7 @@ class THzModule(ModuleBase):
             ),
             DataGroupDescriptor(
                 key="optical_constants", label="Optical Constants",
-                x_label="Frequency (THz)", order=3,
+                x_label="Frequency (THz)", order=4,
                 traces=[
                     TraceDescriptor("oc_n",    "Refractive index n",   "optical_constants", "n",        y_label="n",         default_visible=True),
                     TraceDescriptor("oc_k",    "Extinction coeff k",   "optical_constants", "k",        y_label="k",         default_visible=True),
@@ -620,83 +630,50 @@ class THzModule(ModuleBase):
             ),
         ]
 
-    def get_pipeline_steps(self) -> list[PipelineStepDescriptor]:
+    def pipeline_step_descriptors(self) -> list[PipelineStepDescriptor]:
         return [
             PipelineStepDescriptor(
-                id="load_raw", name="Load Raw Data",
+                id="load_from_files",
+                name="Load Data",
                 params=[
-                    ParameterDescriptor("ref_path", "Reference file", ParamType.FILE_PATH, ""),
-                    ParameterDescriptor("sam_path", "Sample file",    ParamType.FILE_PATH, ""),
+                    ParameterDescriptor("file_paths", "File paths (one per line)",
+                                        ParamType.STRING, ""),
+                    ParameterDescriptor("grouping_keywords", "Grouping keywords",
+                                        ParamType.STRING, "type,series,temp"),
+                    ParameterDescriptor("grouping_delimiter", "Filename delimiter",
+                                        ParamType.STRING, "_"),
                 ],
             ),
             PipelineStepDescriptor(
-                id="window", name="Apply Window",
-                depends_on=["load_raw"],
-                params=[
-                    ParameterDescriptor("window_type", "Window function", ParamType.CHOICE, "boxcar",
-                                        choices=["boxcar", "hann", "hamming", "blackman", "tukey"]),
-                    ParameterDescriptor("start_ps", "Window start (ps)", ParamType.FLOAT, 0.0,
-                                        min=0.0, max=500.0, step=0.1),
-                    ParameterDescriptor("end_ps",   "Window end (ps)",   ParamType.FLOAT, 100.0,
-                                        min=0.0, max=500.0, step=0.1),
-                ],
-            ),
-            PipelineStepDescriptor(
-                id="fft", name="FFT",
-                depends_on=["window"],
-                params=[
-                    ParameterDescriptor("zero_pad", "Zero-pad length", ParamType.INT, 0,
-                                        min=0, max=65536, step=1),
-                ],
-            ),
-            PipelineStepDescriptor(
-                id="transfer_fn", name="Transfer Function",
-                depends_on=["fft"],
-            ),
-            PipelineStepDescriptor(
-                id="optical_constants", name="Extract Optical Constants",
-                depends_on=["transfer_fn"],
-                params=[
-                    ParameterDescriptor("thickness_m", "Sample thickness (m)", ParamType.FLOAT, 315e-6,
-                                        min=0.0, max=0.01, step=1e-6),
-                    ParameterDescriptor("max_iter", "Max iterations", ParamType.INT, 100,
-                                        min=1, max=10000, step=1),
-                ],
+                id="transfer_function",
+                name="Compute Transfer Function",
+                depends_on=["load_from_files"],
             ),
         ]
 
-    def create_pipeline(self) -> list[PipelineStep]:
-        descriptors = {s.id: s for s in self.get_pipeline_steps()}
+    def create_pipeline_steps(self) -> list[PipelineStep]:
+        descriptors = {s.id: s for s in self.pipeline_step_descriptors()}
         return [
-            PipelineStep(id="load_raw",           name="Load Raw Data",
-                         fn=step_load_raw,
-                         params=self._defaults("load_raw", descriptors),
-                         param_descriptors=descriptors["load_raw"].params),
-            PipelineStep(id="window",             name="Apply Window",
-                         fn=step_window,
-                         params=self._defaults("window", descriptors),
-                         param_descriptors=descriptors["window"].params,
-                         depends_on=["load_raw"]),
-            PipelineStep(id="fft",                name="FFT",
-                         fn=step_fft,
-                         params=self._defaults("fft", descriptors),
-                         param_descriptors=descriptors["fft"].params,
-                         depends_on=["window"]),
-            PipelineStep(id="transfer_fn",        name="Transfer Function",
-                         fn=step_transfer_function,
-                         params=self._defaults("transfer_fn", descriptors),
-                         param_descriptors=descriptors["transfer_fn"].params,
-                         depends_on=["fft"]),
-            PipelineStep(id="optical_constants",  name="Extract Optical Constants",
-                         fn=step_optical_constants,
-                         params=self._defaults("optical_constants", descriptors),
-                         param_descriptors=descriptors["optical_constants"].params,
-                         depends_on=["transfer_fn"]),
+            PipelineStep(
+                id="load_from_files",
+                name="Load Data",
+                fn=step_load_from_files,
+                params=_defaults_from(descriptors["load_from_files"]),
+                param_descriptors=descriptors["load_from_files"].params,
+            ),
+            PipelineStep(
+                id="transfer_function",
+                name="Compute Transfer Function",
+                fn=step_compute_transfer_function,
+                params=_defaults_from(descriptors["transfer_function"]),
+                param_descriptors=descriptors["transfer_function"].params,
+                depends_on=["load_from_files"],
+            ),
         ]
 
-    @staticmethod
-    def _defaults(step_id, descriptors):
-        return {p.name: p.default for p in descriptors[step_id].params}
+
+def _defaults_from(desc: PipelineStepDescriptor) -> dict:
+    return {p.name: p.default for p in desc.params}
 ```
 
 ### What a pipeline step function looks like
@@ -710,37 +687,34 @@ from core.data_service import DataService, DataKey, DataEntry
 import numpy as np
 
 
-def step_window(data_service: DataService, series_id: str, **params):
-    """Apply a window function to the raw time-domain data."""
-    window_type = params.get("window_type", "boxcar")
-    start_ps = params.get("start_ps", 0.0)
-    end_ps = params.get("end_ps", 100.0)
+def step_compute_transfer_function(
+    data_service: DataService, series_id: str, **_params
+) -> None:
+    """Compute transfer function from FFT data in the DataService."""
+    ref_amp_entry = data_service.get(DataKey(series_id, "fft", "ref_amp"))
+    sam_amp_entry = data_service.get(DataKey(series_id, "fft", "sam_amp"))
+    ref_phase_entry = data_service.get(DataKey(series_id, "fft", "ref_phase"))
+    sam_phase_entry = data_service.get(DataKey(series_id, "fft", "sam_phase"))
 
-    # Read raw data from data_service
-    ref = data_service.get(DataKey(series_id, "time_domain", "orig_ref_amp"))
-    sam = data_service.get(DataKey(series_id, "time_domain", "orig_sam_amp"))
-    ref_t = data_service.get(DataKey(series_id, "time_domain", "orig_ref_time"))
-    sam_t = data_service.get(DataKey(series_id, "time_domain", "orig_sam_time"))
-
-    if ref is None or sam is None:
+    if ref_amp_entry is None or sam_amp_entry is None:
         return
 
-    # Compute windowed data (actual window logic here)
-    # ...windowed_ref, windowed_sam = apply_window(...)
+    freq, amp_ratio = analysis.compute_transfer_function_amplitude(
+        ref_amp_entry.x, ref_amp_entry.y,
+        sam_amp_entry.x, sam_amp_entry.y,
+    )
+    _put_xy(data_service, series_id, "transfer_function", "amplitude",
+            freq, amp_ratio,
+            "Frequency (THz)", "|H(f)|", "|H(f)| amplitude")
 
-    # Write windowed data back
-    data_service.put(DataEntry(
-        key=DataKey(series_id, "time_domain", "win_ref_amp"),
-        x=ref_t.x, y=windowed_ref,
-        metadata={"x_label": "Time (ps)", "y_label": "Amplitude (V)",
-                  "display_label": "Windowed reference"},
-    ))
-    data_service.put(DataEntry(
-        key=DataKey(series_id, "time_domain", "win_sam_amp"),
-        x=sam_t.x, y=windowed_sam,
-        metadata={"x_label": "Time (ps)", "y_label": "Amplitude (V)",
-                  "display_label": "Windowed sample"},
-    ))
+    if ref_phase_entry is not None and sam_phase_entry is not None:
+        freq_p, phase_diff = analysis.compute_transfer_function_phase(
+            ref_phase_entry.x, ref_phase_entry.y,
+            sam_phase_entry.x, sam_phase_entry.y,
+        )
+        _put_xy(data_service, series_id, "transfer_function", "phase",
+                freq_p, phase_diff,
+                "Frequency (THz)", "Δφ (rad)", "Phase difference")
 ```
 
 ---

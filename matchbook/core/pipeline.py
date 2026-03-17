@@ -172,6 +172,10 @@ class Pipeline:
             return True
         return cached.params_snapshot != self._steps[step_id].params
 
+    def get_cache(self, step_id: str) -> StepResult | None:
+        """Return the cached result for *step_id*, or ``None``."""
+        return self._cache.get(step_id)
+
     # -- history / rewind ------------------------------------------------------
 
     @property

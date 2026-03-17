@@ -401,18 +401,18 @@ def test_module_registration():
 
     check("Module registered", record is not None)
     check("Module name = 'thz_tds'", record.name == "thz_tds")
-    check("4 data groups", len(record.data_groups) == 4)
-    check("3 pipeline steps", len(record.pipeline_step_descriptors) == 3)
+    check("5 data groups", len(record.data_groups) == 5)
+    check("2 pipeline steps", len(record.pipeline_step_descriptors) == 2)
 
     pipeline = registry.get_pipeline("thz_tds")
-    check("Pipeline has 3 steps", len(pipeline.steps) == 3)
+    check("Pipeline has 2 steps", len(pipeline.steps) == 2)
     step_ids = pipeline.step_ids
     check("Step IDs correct",
-          step_ids == ["load_data", "load_from_files", "transfer_function"])
+          step_ids == ["load_from_files", "transfer_function"])
 
     all_groups = registry.all_data_groups
     check(f"all_data_groups returns {len(all_groups)} groups",
-          len(all_groups) == 4)
+          len(all_groups) == 5)
 
 
 def main():

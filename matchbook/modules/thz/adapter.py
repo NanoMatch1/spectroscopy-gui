@@ -10,7 +10,6 @@ Delete this file and the rest of the THz package works standalone.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 import numpy as np
@@ -28,7 +27,8 @@ from matchbook.core.pipeline import PipelineStep
 from matchbook.modules.thz import analysis
 from matchbook.modules.thz.models import AnalysisDataset
 
-from matchbook.io.loaders.registry import get_loader_for_extension, LoaderError
+from matchbook.io.file_ingestor import FileIngestor, IngestedFile
+from matchbook.io.recognisers import register_atomiser, register_recogniser
 from matchbook.modules.thz.containers import THzData
 from matchbook.services.grouping import GroupingService
 
@@ -71,6 +71,58 @@ def _put_xy(
 
 
 # ---------------------------------------------------------------------------
+# Recogniser + Atomiser registrations
+# ---------------------------------------------------------------------------
+
+@register_recogniser("thz_tds")
+def recognise_thz(ingested: IngestedFile) -> float:
+    """Return 1.0 if the loaded data is a THzData object."""
+    return 1.0 if isinstance(ingested.data, THzData) else 0.0
+
+
+@register_atomiser("thz_tds")
+def atomise_thz(
+    ingested: IngestedFile,
+    data_service: DataService,
+    series_id: str,
+) -> None:
+    """Write a single THzData object into the DataService."""
+    thz_obj: THzData = ingested.data
+    filename = ingested.filename
+    file_series = f"{series_id}/{filename}"
+
+    # Store raw compiled array
+    if thz_obj.raw_data is not None:
+        data_service.put(DataEntry(
+            key=DataKey(file_series, "raw", "compiled"),
+            x=thz_obj.raw_data[:, 0],
+            y=thz_obj.raw_data[:, 1] if thz_obj.raw_data.shape[1] > 1 else thz_obj.raw_data[:, 0],
+            metadata={
+                "n_scans": len(thz_obj.data_list),
+                "filename": filename,
+                "data_type": thz_obj.data_type,
+                "full_raw_shape": list(thz_obj.raw_data.shape),
+            },
+        ))
+
+    # Store averaged time-domain data
+    if thz_obj.data is not None:
+        _put_xy(
+            data_service, file_series,
+            "time_domain", "mean",
+            thz_obj.time, thz_obj.y_mean,
+            "Time (ps)", "Amplitude (a.u.)", filename,
+        )
+        if thz_obj.y_err is not None:
+            _put_xy(
+                data_service, file_series,
+                "time_domain", "stderr",
+                thz_obj.time, thz_obj.y_err,
+                "Time (ps)", "Std Error", f"{filename} stderr",
+            )
+
+
+# ---------------------------------------------------------------------------
 # Registry-based file loading
 # ---------------------------------------------------------------------------
 
@@ -82,10 +134,10 @@ def step_load_from_files(
     grouping_keywords: list[str] | None = None,
     grouping_delimiter: str = "_",
 ) -> None:
-    """Load THz data files via the loader registry and auto-group them.
+    """Load THz data files via the FileIngestor and auto-group them.
 
     Accepts a list of file paths (or a single newline-separated string).
-    Uses the loader registry to parse each file, then runs GroupingService
+    Uses the FileIngestor to parse each file, then runs GroupingService
     to pair samples with references.  Associations are stored in the
     DataService.
     """
@@ -97,23 +149,20 @@ def step_load_from_files(
     # Ensure loader modules are imported (triggers @register_loader)
     import matchbook.io.loaders  # noqa: F401
 
-    loaded: dict[str, THzData] = {}
-    for fpath in file_paths:
-        ext = os.path.splitext(fpath)[1]
-        try:
-            loader_cls = get_loader_for_extension(ext)
-        except LoaderError:
-            logger.warning(f"No loader for {ext}, skipping: {fpath}")
-            continue
-        loader = loader_cls(fpath)
-        result = loader.load()
-        if isinstance(result, THzData):
-            loaded[os.path.basename(fpath)] = result
+    # --- Generic: load via FileIngestor ---
+    ingestor = FileIngestor()
+    report = ingestor.load_files(file_paths)
 
+    # Keep only files that produced THzData
+    loaded: dict[str, IngestedFile] = {
+        ing.filename: ing
+        for ing in report.succeeded
+        if isinstance(ing.data, THzData)
+    }
     if not loaded:
         return
 
-    # Group files by filename conventions
+    # --- Generic: group by filename conventions ---
     gs = GroupingService(
         keywords=grouping_keywords or ["type", "series", "temp"],
         delimiter=grouping_delimiter,
@@ -121,41 +170,12 @@ def step_load_from_files(
     )
     gs.simple_grouping(delimiter=grouping_delimiter, keywords=gs.keywords)
 
-    # Atomise each loaded file into the DataService
-    for filename, thz_obj in loaded.items():
+    # --- Module-specific: atomise each file ---
+    for filename, ingested in loaded.items():
+        atomise_thz(ingested, data_service, series_id)
+
+        # Record file-level metadata from grouping
         file_series = f"{series_id}/{filename}"
-
-        # Store raw compiled array
-        if thz_obj.raw_data is not None:
-            data_service.put(DataEntry(
-                key=DataKey(file_series, "raw", "compiled"),
-                x=thz_obj.raw_data[:, 0],
-                y=thz_obj.raw_data[:, 1] if thz_obj.raw_data.shape[1] > 1 else thz_obj.raw_data[:, 0],
-                metadata={
-                    "n_scans": len(thz_obj.data_list),
-                    "filename": filename,
-                    "data_type": thz_obj.data_type,
-                    "full_raw_shape": list(thz_obj.raw_data.shape),
-                },
-            ))
-
-        # Store averaged time-domain data
-        if thz_obj.data is not None:
-            _put_xy(
-                data_service, file_series,
-                "time_domain", "mean",
-                thz_obj.time, thz_obj.y_mean,
-                "Time (ps)", "Amplitude (a.u.)", filename,
-            )
-            if thz_obj.y_err is not None:
-                _put_xy(
-                    data_service, file_series,
-                    "time_domain", "stderr",
-                    thz_obj.time, thz_obj.y_err,
-                    "Time (ps)", "Std Error", f"{filename} stderr",
-                )
-
-        # Record file-level metadata
         info = gs(filename)
         if info is not None:
             data_service.put(DataEntry(
