@@ -7,6 +7,7 @@ all domain content comes from registered modules via their descriptors.
 from __future__ import annotations
 
 import logging
+import os
 import tkinter as tk
 from tkinter import ttk
 from typing import Any
@@ -16,11 +17,12 @@ matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
-from matchbook.core.data_service import DataService
+from matchbook.core.data_service import DataKey, DataService
 from matchbook.core.module_base import DataGroupDescriptor
 from matchbook.core.pipeline import Pipeline
 from matchbook.core.registry import Registry
 from matchbook.gui import plot_area, sidebar, theme
+from matchbook.gui.file_panel import FilePanel
 from matchbook.gui.parameter_panel import ParameterPanel
 from matchbook.gui.pipeline_view import PipelineView
 
@@ -122,6 +124,12 @@ class MatchbookApp:
     # -----------------------------------------------------------------
 
     def _build_ui(self) -> None:
+        # Far left: file panel
+        self._file_panel = FilePanel(
+            self.root,
+            on_load_requested=self._on_files_loaded,
+        )
+
         # Left: sidebar
         sidebar.build_sidebar(
             self.root,
@@ -271,6 +279,61 @@ class MatchbookApp:
             self._active_pipeline.rewind(history_index)
             if self._pipeline_view is not None:
                 self._pipeline_view.refresh()
+
+    # -----------------------------------------------------------------
+    # File panel callback
+    # -----------------------------------------------------------------
+
+    def _on_files_loaded(self, file_paths: list[str]) -> None:
+        """Called by FilePanel after files are successfully ingested.
+
+        Pushes paths into the pipeline's load_from_files params and runs
+        the load step for a series derived from the set of filenames.
+        """
+        if self._active_pipeline is None:
+            return
+
+        # Ensure loader modules are imported
+        import matchbook.io.loaders  # noqa: F401
+
+        path_str = "\n".join(file_paths)
+
+        # Derive a series ID from the common directory name
+        common_dir = os.path.commonpath(file_paths) if file_paths else ""
+        series_id = os.path.basename(common_dir) or "loaded"
+
+        # Push file paths into the load step and run it
+        self._active_pipeline.set_param(
+            "load_from_files", "file_paths", path_str)
+        self._active_pipeline.run_from(
+            "load_from_files", self._data_service, series_id)
+
+        # Build grouping summary for the file panel
+        grouping_lines: list[str] = []
+        for sid in sorted(self._data_service.list_series()):
+            if not sid.startswith(series_id + "/"):
+                continue
+            meta = self._data_service.get(
+                DataKey(sid, "_meta", "grouping"))
+            if meta is not None:
+                dtype = meta.metadata.get("data_type", "?")
+                series_name = meta.metadata.get("series", "")
+                fname = sid.rsplit("/", 1)[-1]
+                grouping_lines.append(f"{fname}: {dtype} ({series_name})")
+
+            # Show associations
+            for src, rel, tgt in self._data_service.list_associations(sid):
+                s_name = src.rsplit("/", 1)[-1]
+                t_name = tgt.rsplit("/", 1)[-1]
+                grouping_lines.append(f"  {s_name} \u2192 {rel} \u2192 {t_name}")
+
+        if grouping_lines:
+            self._file_panel.show_grouping_results("\n".join(grouping_lines))
+
+        # Refresh pipeline view
+        if self._pipeline_view is not None:
+            self._pipeline_view.refresh()
+        self._schedule_redraw()
 
     # -----------------------------------------------------------------
     # Run
