@@ -125,20 +125,23 @@ def phase_1_setup():
 
     # Pipeline
     steps = record.pipeline_step_descriptors
-    check("3 pipeline step descriptors", len(steps) == 3)
+    check("4 pipeline step descriptors", len(steps) == 4)
     check("Step IDs",
           [s.id for s in steps] == ["load_from_files", "group_files",
-                                    "transfer_function"])
+                                    "align_on_peak", "transfer_function"])
     check("group_files depends on load_from_files",
           "load_from_files" in steps[1].depends_on)
-    check("transfer_function depends on group_files",
+    check("align_on_peak depends on group_files",
           "group_files" in steps[2].depends_on)
+    check("transfer_function depends on align_on_peak",
+          "align_on_peak" in steps[3].depends_on)
 
     # Pipeline object
     pipeline = registry.get_pipeline("thz_tds")
-    check("Pipeline has 3 steps", len(pipeline.steps) == 3)
+    check("Pipeline has 4 steps", len(pipeline.steps) == 4)
     check("Pipeline step_ids", pipeline.step_ids == ["load_from_files",
                                                       "group_files",
+                                                      "align_on_peak",
                                                       "transfer_function"])
 
     # Registry aggregation
@@ -284,7 +287,8 @@ def phase_4_pipeline_state(ds, pipeline, series_id):
     # downstream_of
     downstream = pipeline.downstream_of("load_from_files")
     check("downstream_of includes all steps",
-          downstream == ["load_from_files", "group_files", "transfer_function"])
+          downstream == ["load_from_files", "group_files",
+                         "align_on_peak", "transfer_function"])
 
     # Rewind to restore original params
     pipeline.rewind(0)

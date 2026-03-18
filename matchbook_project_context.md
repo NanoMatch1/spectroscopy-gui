@@ -51,7 +51,7 @@ matchbook/
 │   ├── database.py          # Database class — SQLite persistence (save/load/search/sync/provenance)
 │   ├── search.py            # @register_filter/@register_post_filter, build_search_query, 11 SQL filters
 │   ├── file_ingestor.py     # FileIngestor, IngestedFile, IngestReport — generic file loading
-│   ├── recognisers.py       # @register_recogniser, @register_atomiser — module→data bridge
+│   ├── recognisers.py       # @register_recogniser, @register_atomiser — module>data bridge
 │   └── loaders/             # Loader registry + concrete loaders
 │       ├── registry.py      # BaseLoader, @register_loader, get_loader_for_extension, registered_extensions
 │       ├── acc_loader.py    # .acc files
@@ -196,7 +196,7 @@ The adapter registers `recognise_thz` (confidence 1.0 if THzData) and `atomise_t
 ## 6. GUI Components
 
 ### FilePanel (`gui/file_panel.py`)
-- **Collapsible**: click ◀ to collapse to a 28px strip (▶ + vertical "Files" label), ▶ to expand.
+- **Collapsible**: click < to collapse to a 28px strip (> + vertical "Files" label), > to expand.
 - **Two sections**:
   - **Load from Disk**: Browse Files / Add Folder / Remove / Clear buttons, Treeview file list, "Load Files" button.
   - **Database**: Search entry + button, results Treeview (name/module/date), "Load Selected" button.
@@ -204,7 +204,7 @@ The adapter registers `recognise_thz` (confidence 1.0 if THzData) and `atomise_t
 
 ### MatchbookApp (`gui/app.py`)
 - Accepts optional `database` parameter for DB access in the FilePanel.
-- Layout: FilePanel (left, collapsible) → Sidebar → ParameterPanel + PipelineView (right) → Plot area (centre).
+- Layout: FilePanel (left, collapsible) > Sidebar > ParameterPanel + PipelineView (right) > Plot area (centre).
 - `_on_files_loaded`: pushes paths to pipeline, runs `run_from("load_from_files", ...)` (runs full pipeline downstream).
 - `_on_db_search`: calls `database.search(text_search=query)`, populates FilePanel results.
 - `_on_db_load`: calls `database.load_series(sid, data_service)` for each selected series.
@@ -288,12 +288,12 @@ Simulates a full user session:
   - `grouping_step_descriptor()` and `create_grouping_step()` factory for modules to import
 - **Refactored `matchbook/modules/thz/adapter.py`**:
   - Removed all grouping logic from `step_load_from_files` (now load-only)
-  - Pipeline changed: 2 steps → 3 steps (`load_from_files` → `group_files` → `transfer_function`)
+  - Pipeline changed: 2 steps > 3 steps (`load_from_files` > `group_files` > `transfer_function`)
   - Grouping params moved from load step to dedicated group_files step
 - **Rewrote `matchbook/gui/file_panel.py`**:
-  - Added collapse/expand toggle (◀/▶, collapses to 28px strip)
+  - Added collapse/expand toggle (</>, collapses to 28px strip)
   - Added Database section: search entry, results Treeview, "Load Selected" button
-  - Changed "Load & Group" → "Load Files" (grouping is now a pipeline step)
+  - Changed "Load & Group" > "Load Files" (grouping is now a pipeline step)
   - Removed grouping text area (grouping visible via pipeline)
 - **Updated `matchbook/gui/app.py`**:
   - Accepts optional `database` parameter

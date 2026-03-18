@@ -24,11 +24,18 @@ from matchbook.core.module_base import (
 )
 from matchbook.core.pipeline import PipelineStep
 
+import json
+
 from matchbook.modules.thz import analysis
 from matchbook.modules.thz.models import AnalysisDataset
 
 from matchbook.io.file_ingestor import FileIngestor, IngestedFile
-from matchbook.io.recognisers import register_atomiser, register_recogniser
+from matchbook.io.recognisers import (
+    get_atomiser,
+    recognise,
+    register_atomiser,
+    register_recogniser,
+)
 from matchbook.modules.thz.containers import THzData
 from matchbook.services.grouping_step import (
     create_grouping_step,
@@ -153,18 +160,100 @@ def step_load_from_files(
     ingestor = FileIngestor()
     report = ingestor.load_files(file_paths)
 
-    # Keep only files that produced THzData
-    loaded: dict[str, IngestedFile] = {
-        ing.filename: ing
-        for ing in report.succeeded
-        if isinstance(ing.data, THzData)
-    }
-    if not loaded:
+    # --- Route each file to the best-matching module's atomiser ---
+    for ingested in report.succeeded:
+        matches = recognise(ingested)
+        if not matches:
+            logger.warning("No recogniser matched %s — skipping", ingested.filename)
+            continue
+        best_module, confidence = matches[0]
+        logger.debug(
+            "Recognised %s as '%s' (confidence %.2f)",
+            ingested.filename, best_module, confidence,
+        )
+        atomiser = get_atomiser(best_module)
+        atomiser(ingested, data_service, series_id)
+
+
+def step_align_on_peak(
+    data_service: DataService,
+    series_id: str,
+    *,
+    peak_ranges_json: str = "{}",
+    half_window_ps: float = 5.0,
+) -> None:
+    """Trim each series' time-domain trace to a window around its pulse peak.
+
+    For each series, a user-supplied time range (from the span selection
+    session) is searched for the largest-|amplitude| sample (after
+    Savitzky-Golay smoothing).  The trace is then extracted as
+    ``[peak_t - half_window_ps, peak_t + half_window_ps]`` and stored as
+    ``time_domain/aligned_mean``.
+
+    Because each series is processed independently, this step is compatible
+    with the per-series pipeline execution model.  The half-window ensures
+    output traces of equal length when all series share the same dt.
+
+    Parameters
+    ----------
+    peak_ranges_json:
+        JSON-encoded ``{series_id: [t_start, t_end]}`` produced by the
+        span selection session in the GUI.
+    half_window_ps:
+        Half-width of the extraction window around the detected peak (ps).
+    """
+    try:
+        ranges: dict = json.loads(peak_ranges_json) if peak_ranges_json else {}
+    except json.JSONDecodeError:
+        logger.warning("Invalid peak_ranges_json for %s — skipping", series_id)
         return
 
-    # --- Module-specific: atomise each file ---
-    for filename, ingested in loaded.items():
-        atomise_thz(ingested, data_service, series_id)
+    if series_id not in ranges:
+        logger.debug("No peak range configured for %s — skipping", series_id)
+        return
+
+    entry = data_service.get(DataKey(series_id, "time_domain", "mean"))
+    if entry is None:
+        logger.warning("No time_domain/mean data found for %s", series_id)
+        return
+
+    t_arr = entry.x
+    y_arr = entry.y
+
+    # Convert time range to array indices
+    t_start, t_end = float(ranges[series_id][0]), float(ranges[series_id][1])
+    idx_s = int(np.searchsorted(t_arr, t_start))
+    idx_e = int(np.searchsorted(t_arr, t_end))
+    if idx_s >= idx_e:
+        logger.warning("Empty search range for %s ([%.3f, %.3f] ps)", series_id, t_start, t_end)
+        return
+
+    # Smooth and find peak
+    try:
+        from thz_core.preprocess import find_extremum_in_index_range
+        from thz_core._common import smooth_trace_savgol
+        y_smooth = smooth_trace_savgol(y_arr, window_length=11, polyorder=3)
+        result = find_extremum_in_index_range(t_arr, y_smooth, idx_s, idx_e, mode="abs")
+        peak_t = float(result["last_pick"]["x"])
+    except Exception as exc:
+        logger.error("Peak detection failed for %s: %s", series_id, exc)
+        return
+
+    # Extract fixed-width window around the peak
+    mask = (t_arr >= peak_t - half_window_ps) & (t_arr <= peak_t + half_window_ps)
+    if not np.any(mask):
+        logger.warning("Window [%.3f, %.3f] ps contains no samples for %s",
+                       peak_t - half_window_ps, peak_t + half_window_ps, series_id)
+        return
+
+    _put_xy(
+        data_service, series_id,
+        "time_domain", "aligned_mean",
+        t_arr[mask], y_arr[mask],
+        "Time (ps)", "Amplitude (a.u.)", f"Aligned: {series_id}",
+    )
+    logger.info("Aligned %s: peak @ %.3f ps, window [%.3f, %.3f] ps",
+                series_id, peak_t, float(t_arr[mask][0]), float(t_arr[mask][-1]))
 
 
 def step_compute_transfer_function(
@@ -244,6 +333,9 @@ class THzModule:
                     TraceDescriptor("td_stderr", "Std error",
                                     "time_domain", "stderr",
                                     y_label="Std Error"),
+                    TraceDescriptor("td_aligned_mean", "Aligned mean",
+                                    "time_domain", "aligned_mean",
+                                    y_label="Amplitude (a.u.)", default_visible=False),
                 ],
             ),
             DataGroupDescriptor(
@@ -321,9 +413,33 @@ class THzModule:
             ),
             grouping_step_descriptor(depends_on=["load_from_files"]),
             PipelineStepDescriptor(
+                id="align_on_peak",
+                name="Align on Peak",
+                params=[
+                    ParameterDescriptor(
+                        name="peak_ranges_json",
+                        label="Peak ranges",
+                        type=ParamType.SPAN_SESSION,
+                        default="{}",
+                        data_group="time_domain",
+                        tooltip="Per-series time ranges for pulse peak detection",
+                    ),
+                    ParameterDescriptor(
+                        name="half_window_ps",
+                        label="Half-window (ps)",
+                        type=ParamType.FLOAT,
+                        default=5.0,
+                        min=0.5,
+                        max=50.0,
+                        tooltip="Half-width of extraction window around detected peak",
+                    ),
+                ],
+                depends_on=["group_files"],
+            ),
+            PipelineStepDescriptor(
                 id="transfer_function",
                 name="Compute Transfer Function",
-                depends_on=["group_files"],
+                depends_on=["align_on_peak"],
             ),
         ]
 
@@ -340,12 +456,20 @@ class THzModule:
             ),
             create_grouping_step(depends_on=["load_from_files"]),
             PipelineStep(
+                id="align_on_peak",
+                name="Align on Peak",
+                fn=step_align_on_peak,
+                params=_defaults_from(descriptors["align_on_peak"]),
+                param_descriptors=descriptors["align_on_peak"].params,
+                depends_on=["group_files"],
+            ),
+            PipelineStep(
                 id="transfer_function",
                 name="Compute Transfer Function",
                 fn=step_compute_transfer_function,
                 params=_defaults_from(descriptors["transfer_function"]),
                 param_descriptors=descriptors["transfer_function"].params,
-                depends_on=["group_files"],
+                depends_on=["align_on_peak"],
             ),
         ]
 

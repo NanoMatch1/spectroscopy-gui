@@ -29,6 +29,7 @@ class ParamType(Enum):
     BOOL = "bool"
     CHOICE = "choice"
     FILE_PATH = "file_path"
+    SPAN_SESSION = "span_session"  # Interactive per-trace time-range selector
 
 
 @dataclass
@@ -61,6 +62,7 @@ class ParameterDescriptor:
     step: float | int | None = None
     choices: list[str] | None = None
     tooltip: str = ""
+    data_group: str = ""  # For SPAN_SESSION: which DataService group to fetch traces from
 
 
 # ---------------------------------------------------------------------------

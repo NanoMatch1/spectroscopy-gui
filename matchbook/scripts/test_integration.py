@@ -406,13 +406,13 @@ def test_module_registration():
     check("Module registered", record is not None)
     check("Module name = 'thz_tds'", record.name == "thz_tds")
     check("5 data groups", len(record.data_groups) == 5)
-    check("3 pipeline steps", len(record.pipeline_step_descriptors) == 3)
+    check("4 pipeline steps", len(record.pipeline_step_descriptors) == 4)
 
     pipeline = registry.get_pipeline("thz_tds")
-    check("Pipeline has 3 steps", len(pipeline.steps) == 3)
+    check("Pipeline has 4 steps", len(pipeline.steps) == 4)
     step_ids = pipeline.step_ids
     check("Step IDs correct",
-          step_ids == ["load_from_files", "group_files", "transfer_function"])
+          step_ids == ["load_from_files", "group_files", "align_on_peak", "transfer_function"])
 
     all_groups = registry.all_data_groups
     check(f"all_data_groups returns {len(all_groups)} groups",

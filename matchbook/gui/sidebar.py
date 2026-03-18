@@ -32,8 +32,16 @@ def build_sidebar(
     manual_y_min: dict[str, tk.StringVar],
     manual_y_max: dict[str, tk.StringVar],
     schedule_redraw: Callable[[], None],
-) -> ttk.Frame:
-    """Build the full sidebar widget.  Returns the outer frame."""
+) -> tuple[ttk.Frame, ttk.Frame]:
+    """Build the full sidebar widget.
+
+    Returns
+    -------
+    (sidebar_frame, series_body_frame)
+        The outer sidebar frame and the inner frame holding series
+        checkboxes — the latter can be passed to
+        :func:`refresh_series_section` when new series arrive.
+    """
 
     sidebar = ttk.Frame(parent, width=theme.SIDEBAR_WIDTH)
     sidebar.pack(side=tk.LEFT, fill=tk.Y, padx=(6, 0), pady=6)
@@ -54,7 +62,7 @@ def build_sidebar(
     _bind_mousewheel(canvas)
 
     # -- Series section --
-    _build_series_section(inner, series_names, series_vars)
+    series_body = _build_series_section(inner, series_names, series_vars)
 
     ttk.Separator(inner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6, padx=4)
 
@@ -68,21 +76,46 @@ def build_sidebar(
         )
         ttk.Separator(inner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4, padx=4)
 
-    return sidebar
+    return sidebar, series_body
 
 
 # ---------------------------------------------------------------------------
 # Internal builders
 # ---------------------------------------------------------------------------
 
+def refresh_series_section(
+    series_body: ttk.Frame,
+    series_names: list[str],
+    series_vars: dict[str, tk.BooleanVar],
+) -> None:
+    """Rebuild the series checkboxes inside an existing series body frame.
+
+    Call this whenever the series list changes after the sidebar was built.
+    *series_vars* must already contain a ``BooleanVar`` for each name in
+    *series_names* before this is called.
+    """
+    for widget in series_body.winfo_children():
+        widget.destroy()
+    _populate_series_body(series_body, series_names, series_vars)
+
+
 def _build_series_section(
     parent: ttk.Frame,
     series_names: list[str],
     series_vars: dict[str, tk.BooleanVar],
-) -> None:
-    """Build the 'Series' collapsible section with colour-coded toggles."""
+) -> ttk.Frame:
+    """Build the 'Series' collapsible section.  Returns the body frame."""
     body = _build_collapsible(parent, "Series")
+    _populate_series_body(body, series_names, series_vars)
+    return body
 
+
+def _populate_series_body(
+    body: ttk.Frame,
+    series_names: list[str],
+    series_vars: dict[str, tk.BooleanVar],
+) -> None:
+    """Create one colour-coded checkbox per series name inside *body*."""
     for idx, name in enumerate(series_names):
         colour = theme.series_colour(idx)
         frame = ttk.Frame(body)

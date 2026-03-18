@@ -220,11 +220,3 @@ class GroupingService:
                     fileitem.substrate_reference = ref_filename
                     fileitem.air_reference = self.global_reference.get("air")
 
-    def _separate_by_delimiters(
-        self, delimiter: str | None = None,
-    ) -> list[str] | None:
-        delimiter = delimiter or self.delimiter
-        for filename in self.filelist:
-            components = filename.split(delimiter)
-            return [c.strip() for c in components if c.strip()]
-        return None

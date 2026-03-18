@@ -1,0 +1,11 @@
+Feature:
+1. series autonaming - lets create a nested collapsible checkbox list that has the series name as the top level (currently using folder name), and the filename as the following level. Once grouping is done, if "series" is a grouping keyword, lets rename and group the series to the extracted string here. Note that multiple folders and series may be added over time, so this needs to support reassigning of series and adding to the checkbox nested lists dynamically.
+2. It would be useful to have a feature that removes series from the processing list or workflow. Lets start with, if the file is not in the "load from disk" section as "loaded" or from the database section, it should be remove from the series panel and from the data service as a whole.
+3. Collapsible pipeline windows would be useful too.
+4. after align on peak has configured the ranges, a button to show them on a shared axes (to visualise the alignment) would be useful. This can be in the main window, or a separate pop up window, whichever is the best compromise between simplicity in the code and cleanness.
+5. Std error currently adds a trace to the time domain, and presumably other groups in the sidebar when we get there. It would be better to condense the std error into a channel/width of shaded area around the averaged trace to show the error on the other traces.
+
+Bugs:
+1. Clicking on the checkboxes or updating the plot by zooming reshapes the plot size/boundaries inside the main window in width, usually making them smaller in width. It can be temporarilly restored by updating the figure through interaction with the GUI. The plot figure window should maintian the same width always (it should not appear to change shape when toggling series).
+2. Loading one file from a different folder than the files that are already present creates new series items that mix folder file and series.
+3. Buttons and labels and widgets in the pipeline window are cut by the edge of the window. A way to resize the window manually or auto-detect and wrap features would be useful.

@@ -22,11 +22,14 @@ def _edit_single_array(
 ) -> tuple[np.ndarray, bool]:
     """Open an interactive editor for one raw acquisition matrix.
 
-    Expected shape: ``(N_points, 1 + N_acquisitions)``
+    Expected shape: (N_points, 1 + N_acquisitions)
       - col 0: x/time axis
-      - cols 1…: acquisitions
+      - cols 1..: acquisitions
 
-    Returns ``(edited_array, saved_flag)``.
+    Returns
+    -------
+    tuple[np.ndarray, bool]
+        edited array and flag indicating whether user pressed save.
     """
     raw = np.asarray(raw_array)
     if raw.ndim != 2 or raw.shape[1] < 2:
@@ -34,25 +37,29 @@ def _edit_single_array(
 
     time = raw[:, 0]
     acq_indices = list(range(1, raw.shape[1]))
+
     work_raw = np.array(raw, copy=True)
+
     active = {idx: True for idx in acq_indices}
     selected_idx = acq_indices[0]
 
     fig = plt.figure(figsize=(14, 8))
 
+    # ── Left column: main plot, std-dev plot, acquisition slider ──
     L, PW = 0.08, 0.56
-    ax      = fig.add_axes([L, 0.44, PW, 0.50])
-    ax_std  = fig.add_axes([L, 0.26, PW, 0.14])
-    ax_sel  = fig.add_axes([L + 0.11, 0.15, PW - 0.11, 0.03])
+    ax     = fig.add_axes([L, 0.44, PW, 0.50])                # main plot
+    ax_std = fig.add_axes([L, 0.26, PW, 0.14])                # std dev plot
+    ax_sel = fig.add_axes([L + 0.11, 0.15, PW - 0.11, 0.03])  # slider
 
+    # ── Right column: buttons, list panels, page sliders, save ──
     R, RW = 0.70, 0.25
-    ax_btn       = fig.add_axes([R, 0.91, RW, 0.05])
-    ax_patch_btn = fig.add_axes([R, 0.85, RW, 0.05])
-    ax_incl      = fig.add_axes([R, 0.57, RW, 0.26])
-    ax_incl_page = fig.add_axes([R, 0.53, RW, 0.03])
-    ax_excl      = fig.add_axes([R, 0.21, RW, 0.26])
-    ax_excl_page = fig.add_axes([R, 0.17, RW, 0.03])
-    ax_save_btn  = fig.add_axes([R, 0.06, RW, 0.05])
+    ax_btn       = fig.add_axes([R, 0.91, RW, 0.05])    # toggle button
+    ax_patch_btn = fig.add_axes([R, 0.85, RW, 0.05])    # patch button
+    ax_incl      = fig.add_axes([R, 0.57, RW, 0.26])    # included list
+    ax_incl_page = fig.add_axes([R, 0.53, RW, 0.03])    # page slider
+    ax_excl      = fig.add_axes([R, 0.21, RW, 0.26])    # excluded list
+    ax_excl_page = fig.add_axes([R, 0.17, RW, 0.03])    # page slider
+    ax_save_btn  = fig.add_axes([R, 0.06, RW, 0.05])    # save button
 
     fig.suptitle(f"Acquisition Comparison: {filename}", y=0.97, fontsize=13)
 
@@ -62,18 +69,30 @@ def _edit_single_array(
         lines[idx] = ln
 
     (selected_point_marker,) = ax.plot(
-        [np.nan], [np.nan],
-        marker="o", linestyle="None", markersize=7,
-        markeredgecolor="black", markerfacecolor="gold", zorder=6,
+        [np.nan],
+        [np.nan],
+        marker="o",
+        linestyle="None",
+        markersize=7,
+        markeredgecolor="black",
+        markerfacecolor="gold",
+        zorder=6,
     )
 
     (mean_line,) = ax.plot(
-        time, np.full_like(time, np.nan, dtype=float),
-        color="tab:red", linewidth=2.0, zorder=4, label="Mean (included)",
+        time,
+        np.full_like(time, np.nan, dtype=float),
+        color="tab:red",
+        linewidth=2.0,
+        zorder=4,
+        label="Mean (included)",
     )
     (std_line,) = ax_std.plot(
-        time, np.full_like(time, np.nan, dtype=float),
-        color="tab:purple", linewidth=1.6, label="Std (included)",
+        time,
+        np.full_like(time, np.nan, dtype=float),
+        color="tab:purple",
+        linewidth=1.6,
+        label="Std (included)",
     )
 
     ax.set_ylabel("Signal Amplitude")
@@ -87,31 +106,55 @@ def _edit_single_array(
     ax_std.set_xlim(ax.get_xlim())
 
     sel_slider = Slider(
-        ax=ax_sel, label="Selected",
-        valmin=0, valmax=max(0, len(acq_indices) - 1),
-        valinit=0, valstep=1 if len(acq_indices) > 1 else None,
+        ax=ax_sel,
+        label="Selected",
+        valmin=0,
+        valmax=max(0, len(acq_indices) - 1),
+        valinit=0,
+        valstep=1 if len(acq_indices) > 1 else None,
     )
 
-    incl_page_slider = Slider(ax=ax_incl_page, label="", valmin=0, valmax=0, valinit=0, valstep=1)
-    excl_page_slider = Slider(ax=ax_excl_page, label="", valmin=0, valmax=0, valinit=0, valstep=1)
+    incl_page_slider = Slider(
+        ax=ax_incl_page,
+        label="",
+        valmin=0,
+        valmax=0,
+        valinit=0,
+        valstep=1,
+    )
+    excl_page_slider = Slider(
+        ax=ax_excl_page,
+        label="",
+        valmin=0,
+        valmax=0,
+        valinit=0,
+        valstep=1,
+    )
 
     btn_toggle = Button(ax_btn, "Toggle selected (include/exclude)")
     btn_patch_point = Button(ax_patch_btn, "Toggle point patch")
     btn_save = Button(ax_save_btn, "Save changes")
 
     ax.text(
-        0.01, 0.99,
+        0.01,
+        0.99,
         "Keys: x = include/exclude selected, p = patch/restore point, s = save",
-        transform=ax.transAxes, va="top", ha="left", fontsize=8,
+        transform=ax.transAxes,
+        va="top",
+        ha="left",
+        fontsize=8,
         bbox=dict(boxstyle="round,pad=0.2", alpha=0.15),
     )
 
     selected_point_idx = None
-    point_patch_state: dict[tuple[int, int], dict] = {}
-    incl_text_artists: list = []
-    excl_text_artists: list = []
+    point_patch_state: dict[tuple[int, int], dict[str, float | bool]] = {}
+    incl_text_artists = []
+    excl_text_artists = []
 
-    state = {"saved": False, "result": np.array(raw, copy=True)}
+    state = {
+        "saved": False,
+        "result": np.array(raw, copy=True),
+    }
 
     def get_included():
         return [i for i in acq_indices if active.get(i, False)]
@@ -132,11 +175,15 @@ def _edit_single_array(
         for spine in ax_list.spines.values():
             spine.set_visible(True)
 
-    def _render_list(ax_list, title, items, page, artists, pick_prefix):
+    def _render_list(ax_list, title, items, page, artists, pick_prefix: str):
         _clear_list(ax_list, artists)
+
+        # Title rendered inside the axes so it never overlaps neighbours.
         t_title = ax_list.text(
-            0.50, 0.97, title, transform=ax_list.transAxes,
-            ha="center", va="top", fontsize=10, fontweight="bold",
+            0.50, 0.97, title,
+            transform=ax_list.transAxes,
+            ha="center", va="top",
+            fontsize=10, fontweight="bold",
         )
         artists.append(t_title)
 
@@ -146,21 +193,32 @@ def _edit_single_array(
 
         if not view:
             t = ax_list.text(
-                0.02, 0.85, "(none on this page)",
-                transform=ax_list.transAxes, va="top", fontsize=9, alpha=0.7,
+                0.02,
+                0.85,
+                "(none on this page)",
+                transform=ax_list.transAxes,
+                va="top",
+                fontsize=9,
+                alpha=0.7,
             )
             artists.append(t)
             return
 
         n = len(view)
-        top, bottom = 0.88, 0.03
+        top = 0.88
+        bottom = 0.03
         step = (top - bottom) / max(1, n)
 
         for k, idx in enumerate(view):
             y = top - k * step
             t = ax_list.text(
-                0.02, y, f"Acq {idx}",
-                transform=ax_list.transAxes, va="top", fontsize=9, picker=True,
+                0.02,
+                y,
+                f"Acq {idx}",
+                transform=ax_list.transAxes,
+                va="top",
+                fontsize=9,
+                picker=True,
             )
             t.set_gid(f"{pick_prefix}:{idx}")
             artists.append(t)
@@ -168,14 +226,18 @@ def _edit_single_array(
     def _update_page_sliders():
         incl = get_included()
         excl = get_excluded()
+
         incl_pages = max(1, int(np.ceil(len(incl) / page_size)))
         excl_pages = max(1, int(np.ceil(len(excl) / page_size)))
+
         incl_page_slider.valmax = incl_pages - 1
         excl_page_slider.valmax = excl_pages - 1
+
         if incl_page_slider.val > incl_page_slider.valmax:
             incl_page_slider.set_val(incl_page_slider.valmax)
         if excl_page_slider.val > excl_page_slider.valmax:
             excl_page_slider.set_val(excl_page_slider.valmax)
+
         incl_page_slider.ax.set_xlim(incl_page_slider.valmin, incl_page_slider.valmax)
         excl_page_slider.ax.set_xlim(excl_page_slider.valmin, excl_page_slider.valmax)
 
@@ -189,7 +251,8 @@ def _edit_single_array(
         if key is None:
             btn_patch_point.label.set_text("Toggle point patch (no point)")
             return
-        patch_info = point_patch_state.get(key)
+
+        patch_info = point_patch_state.get(key, None)
         if patch_info and patch_info.get("patched", False):
             btn_patch_point.label.set_text(
                 f"Restore point: Acq {selected_idx}, idx {selected_point_idx}"
@@ -203,6 +266,7 @@ def _edit_single_array(
         if selected_point_idx is None:
             selected_point_marker.set_data([np.nan], [np.nan])
             return
+
         y_value = work_raw[selected_point_idx, selected_idx]
         selected_point_marker.set_data([time[selected_point_idx]], [y_value])
 
@@ -217,8 +281,10 @@ def _edit_single_array(
         for idx, ln in lines.items():
             is_on = active.get(idx, False)
             ln.set_visible(is_on)
+
             if not is_on:
                 continue
+
             if idx == selected_idx:
                 ln.set_color("tab:green")
                 ln.set_alpha(1.0)
@@ -229,13 +295,16 @@ def _edit_single_array(
                 ln.set_alpha(0.5)
                 ln.set_linewidth(1.0)
                 ln.set_zorder(2)
+
             ln.set_ydata(work_raw[:, idx])
 
         included = get_included()
         if included:
-            stack = np.column_stack([work_raw[:, idx] for idx in included])
-            mean_trace = np.mean(stack, axis=1)
-            std_trace = np.std(stack, axis=1, ddof=1 if len(included) > 1 else 0)
+            included_stack = np.column_stack([work_raw[:, idx] for idx in included])
+            mean_trace = np.mean(included_stack, axis=1)
+            std_trace = np.std(
+                included_stack, axis=1, ddof=1 if len(included) > 1 else 0
+            )
         else:
             mean_trace = np.full_like(time, np.nan, dtype=float)
             std_trace = np.full_like(time, np.nan, dtype=float)
@@ -253,6 +322,8 @@ def _edit_single_array(
         ax_std.relim()
         ax_std.autoscale_view(scalex=False, scaley=True)
 
+        # Constrain log-scale y-limits to the actual data range so tick
+        # labels don't extend far outside the axes.
         valid_std = std_trace[np.isfinite(std_trace) & (std_trace > 0)]
         if valid_std.size > 0:
             ax_std.set_ylim(valid_std.min() * 0.3, valid_std.max() * 3.0)
@@ -264,17 +335,22 @@ def _edit_single_array(
         incl_page = int(incl_page_slider.val)
         excl_page = int(excl_page_slider.val)
 
-        _render_list(ax_incl, "Included", get_included(), incl_page, incl_text_artists, "incl")
-        _render_list(ax_excl, "Excluded", get_excluded(), excl_page, excl_text_artists, "excl")
+        _render_list(
+            ax_incl, "Included", get_included(), incl_page, incl_text_artists, "incl"
+        )
+        _render_list(
+            ax_excl, "Excluded", get_excluded(), excl_page, excl_text_artists, "excl"
+        )
 
         fig.canvas.draw_idle()
 
-    def toggle_idx(idx):
+    def toggle_idx(idx: int):
         active[idx] = not active.get(idx, True)
         apply_styling()
 
     def on_sel_slider(_val):
-        nonlocal selected_idx, selected_point_idx
+        nonlocal selected_idx
+        nonlocal selected_point_idx
         pos = int(sel_slider.val)
         pos = max(0, min(pos, len(acq_indices) - 1))
         selected_idx = acq_indices[pos]
@@ -297,7 +373,7 @@ def _edit_single_array(
 
     btn_toggle.on_clicked(on_toggle_selected)
 
-    def _patched_neighbor_value(column_index, point_index):
+    def _patched_neighbor_value(column_index: int, point_index: int) -> float:
         col = work_raw[:, column_index]
         if point_index <= 0:
             return float(col[1]) if col.size > 1 else float(col[0])
@@ -308,15 +384,21 @@ def _edit_single_array(
     def on_toggle_patch_point(_event):
         key = _selected_point_key()
         if key is None:
-            return
-        column_index, point_index = key
-        if not active.get(column_index, False):
+            print("Select a point in the top plot first (active acquisition only).")
             return
 
-        patch_info = point_patch_state.get(key)
+        column_index, point_index = key
+        if not active.get(column_index, False):
+            print(
+                "Selected acquisition is currently excluded; include it before patching points."
+            )
+            return
+
+        patch_info = point_patch_state.get(key, None)
         if patch_info is None:
+            original_value = float(work_raw[point_index, column_index])
             patch_info = {
-                "original": float(work_raw[point_index, column_index]),
+                "original": original_value,
                 "patched": False,
             }
             point_patch_state[key] = patch_info
@@ -326,7 +408,7 @@ def _edit_single_array(
             patch_info["patched"] = False
         else:
             work_raw[point_index, column_index] = _patched_neighbor_value(
-                column_index, point_index,
+                column_index, point_index
             )
             patch_info["patched"] = True
 
@@ -343,16 +425,25 @@ def _edit_single_array(
 
     def on_main_click(event):
         nonlocal selected_point_idx
-        if event.inaxes is not ax or event.xdata is None:
+
+        if event.inaxes is not ax:
+            return
+        if event.xdata is None:
             return
         if not active.get(selected_idx, False):
+            print(
+                "Active acquisition is excluded; include it to select/edit a point."
+            )
             return
-        selected_point_idx = int(np.argmin(np.abs(time - event.xdata)))
+
+        point_index = int(np.argmin(np.abs(time - event.xdata)))
+        selected_point_idx = point_index
         apply_styling()
 
     def on_key_press(event):
         if event.key is None:
             return
+
         key = str(event.key).lower()
         if key == "x":
             on_toggle_selected(None)
@@ -365,7 +456,8 @@ def _edit_single_array(
     fig.canvas.mpl_connect("key_press_event", on_key_press)
 
     def on_pick(event):
-        gid = getattr(event.artist, "get_gid", lambda: None)()
+        artist = event.artist
+        gid = getattr(artist, "get_gid", lambda: None)()
         if not gid or ":" not in gid:
             return
         _, idx_str = gid.split(":", 1)
@@ -377,14 +469,19 @@ def _edit_single_array(
         nonlocal selected_idx
         selected_idx = idx
         try:
-            sel_slider.set_val(acq_indices.index(idx))
+            sel_pos = acq_indices.index(idx)
+            sel_slider.set_val(sel_pos)
         except ValueError:
             pass
+
         toggle_idx(idx)
 
     fig.canvas.mpl_connect("pick_event", on_pick)
 
     apply_styling()
+
+    print(f"File: {filename}")
+    print("Close window without saving to keep original data for this item.")
     plt.show()
 
     return np.asarray(state["result"]), bool(state["saved"])
@@ -401,7 +498,7 @@ def edit_acquisitions(
     Parameters
     ----------
     data
-        Single ndarray ``(N, >=2)`` — ``[time | acq1 | acq2 | …]``, **or**
+        Single ndarray ``(N, >=2)``  — ``[time | acq1 | acq2 | …]``, **or**
         a mapping ``{name: ndarray}`` to process several arrays sequentially.
     filename
         Display name when *data* is a single array.
@@ -410,24 +507,27 @@ def edit_acquisitions(
 
     Returns
     -------
-    Edited array (single mode) or mapping of edited arrays (dict mode).
-    Closing the editor without saving returns the original data unchanged.
+    np.ndarray | dict[str, np.ndarray]
+        Edited array (single mode) or mapping of edited arrays (dict mode).
+        Closing the editor without saving returns the original data unchanged.
     """
     if isinstance(data, np.ndarray):
         edited, saved = _edit_single_array(
-            data, filename=filename or "array", page_size=page_size,
+            data, filename=filename or "array", page_size=page_size
         )
-        return edited if saved else np.array(data, copy=True)
+        if not saved:
+            return np.array(data, copy=True)
+        return edited
 
     if isinstance(data, Mapping):
         output: dict[str, np.ndarray] = {}
         for key, value in data.items():
             edited, saved = _edit_single_array(
-                value, filename=str(key), page_size=page_size,
+                value, filename=str(key), page_size=page_size
             )
             output[key] = edited if saved else np.array(value, copy=True)
         return output
 
     raise TypeError(
-        "data must be either a numpy.ndarray or a mapping of name -> ndarray"
+        "data must be either a numpy.ndarray or a mapping of name -> numpy.ndarray"
     )

@@ -22,6 +22,9 @@ from matchbook.core.registry import Registry
 from matchbook.gui.app import MatchbookApp
 from matchbook.io.database import Database
 from matchbook.modules.thz.adapter import THzModule
+# import thz_core as thz  # for interactive use in the GUI's console
+import thz_core
+
 
 
 _DEFAULT_DB = os.path.join(_WORKSPACE, "matchbook_data.db")

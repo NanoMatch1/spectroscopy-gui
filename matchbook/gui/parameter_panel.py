@@ -16,6 +16,16 @@ from matchbook.core.module_base import (
     ParamType,
     PipelineStepDescriptor,
 )
+
+# Signature for the span-session activation callback provided by the app:
+#   on_activate_span_session(step_id, param_desc, controls_frame, on_done, on_cancel)
+# where:
+#   on_done(results_json: str, n_configured: int) -> None
+#   on_cancel() -> None
+SpanSessionActivator = Callable[
+    [str, ParameterDescriptor, Any, Callable[[str, int], None], Callable[[], None]],
+    None,
+]
 from matchbook.gui import theme
 
 
@@ -32,6 +42,7 @@ class ParameterPanel:
         step_descriptors: list[PipelineStepDescriptor],
         on_param_changed: Callable[[str, str, Any], None],
         on_run_from: Callable[[str], None],
+        on_activate_span_session: SpanSessionActivator | None = None,
     ) -> None:
         """
         Parameters
@@ -46,9 +57,14 @@ class ParameterPanel:
         on_run_from:
             Called as ``on_run_from(step_id)`` when the user clicks
             'Run from here'.
+        on_activate_span_session:
+            Optional callback invoked when a SPAN_SESSION parameter's
+            'Configure...' button is clicked.  If None, SPAN_SESSION
+            parameters render as disabled.
         """
         self._on_param_changed = on_param_changed
         self._on_run_from = on_run_from
+        self._on_activate_span_session = on_activate_span_session
         self._param_widgets: dict[str, dict[str, tk.Variable]] = {}
 
         self.frame = ttk.Frame(parent, width=250)
@@ -170,6 +186,44 @@ class ParameterPanel:
             else:
                 entry = ttk.Entry(row, textvariable=var, width=14)
                 entry.pack(side=tk.LEFT)
+
+        elif param.type == ParamType.SPAN_SESSION:
+            # A JSON-string var holds the per-series result dict.
+            var = tk.StringVar(value=str(param.default))
+            summary_var = tk.StringVar(value="Not configured")
+            ttk.Label(row, textvariable=summary_var,
+                      font=("TkDefaultFont", theme.SIDEBAR_FONT_SIZE,
+                            "italic")).pack(side=tk.LEFT)
+
+            # controls_frame: hidden when idle, populated by session
+            controls_frame = ttk.Frame(parent)
+            controls_frame.pack(fill=tk.X)
+
+            configure_btn = ttk.Button(row, text="Configure…", width=12)
+            configure_btn.pack(side=tk.LEFT, padx=(4, 0))
+
+            def _on_done(results_json: str, n: int,
+                         _sv=summary_var, _v=var, _btn=configure_btn,
+                         _sid=step_id, _pn=param.name) -> None:
+                _sv.set(f"{n}/{n} configured")
+                _v.set(results_json)
+                _btn.pack(side=tk.LEFT, padx=(4, 0))
+                self._handle_change(_sid, _pn, _v)
+
+            def _on_cancel_session(_btn=configure_btn) -> None:
+                _btn.pack(side=tk.LEFT, padx=(4, 0))
+
+            def _activate(_btn=configure_btn, _p=param,
+                          _sid=step_id, _cf=controls_frame) -> None:
+                _btn.pack_forget()
+                if self._on_activate_span_session is not None:
+                    self._on_activate_span_session(
+                        _sid, _p, _cf, _on_done, _on_cancel_session)
+
+            configure_btn.configure(
+                command=_activate,
+                state=tk.NORMAL if self._on_activate_span_session else tk.DISABLED,
+            )
 
         else:
             # STRING or fallback

@@ -3,14 +3,18 @@
 Returns a dict::
 
     {
-        "filename":     str,
-        "header":       list[str],
-        "scan_headers": list[list[str]],
-        "data":         np.ndarray,   # (N_points, 1 + N_scans)
+        "filename":         str,            # basename of the file
+        "header":           list[str],      # header lines from the first scan
+                                            #   (leading '%' stripped)
+        "scan_headers":     list[list[str]] # per-scan header lines (one list
+                                            #   per scan, '%' stripped)
+        "data":             np.ndarray,     # float64, (N_points, 1+N_scans)
+                                            #   col 0=time, cols 1…=signals
     }
 
-Used by the acquisition editor to load raw scan data without requiring
-the full loader registry.
+.acc files contain multiple scans separated by ``%%``.  Each scan shares
+the same time axis; only the signal column differs.  The returned ``data``
+stacks them as ``[time | scan1 | scan2 | …]``.
 """
 
 from __future__ import annotations
@@ -21,8 +25,9 @@ from typing import Union
 import numpy as np
 
 
-SUPPORTED_EXTENSIONS = (".acc",)
-
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 def _parse_rows(rows: list[str]) -> np.ndarray:
     """Parse space-separated numeric rows into a 2-D float array."""
@@ -40,7 +45,8 @@ def _parse_rows(rows: list[str]) -> np.ndarray:
     return np.array(numeric, dtype=np.float64)
 
 
-def _split_header_and_data(text: str) -> tuple[list[str], list[str]]:
+def _split_header_and_data(text: str):
+    """Return (header_lines, data_rows) from a block of text."""
     header: list[str] = []
     data: list[str] = []
     for line in text.split("\n"):
@@ -54,11 +60,19 @@ def _split_header_and_data(text: str) -> tuple[list[str], list[str]]:
     return header, data
 
 
+# ---------------------------------------------------------------------------
+# Public loader
+# ---------------------------------------------------------------------------
+
+SUPPORTED_EXTENSIONS = (".acc",)
+
+
 def load_acc(filepath: Union[str, Path]) -> dict:
     """Load an ``.acc`` file and return a standardised dict.
 
-    Multiple scans (delimited by ``%%``) are combined so that ``data``
-    has shape ``(N_points, 1 + N_scans)``.
+    Multiple scans (delimited by ``%%``) are combined so that ``data`` has
+    shape ``(N_points, 1 + N_scans)``.  Per-scan headers are preserved in
+    ``scan_headers``.
     """
     filepath = Path(filepath)
     raw_text = filepath.read_text(encoding="utf-8")
@@ -105,9 +119,12 @@ def load_acc(filepath: Union[str, Path]) -> dict:
 
 
 def load_file(filepath: Union[str, Path]) -> dict:
-    """Load an ``.acc`` file.
+    """Load a ``.acc`` file.
 
-    Raises ``ValueError`` if the extension is not ``.acc``.
+    Raises
+    ------
+    ValueError
+        If the extension is not ``.acc``.
     """
     filepath = Path(filepath)
     ext = filepath.suffix.lower()

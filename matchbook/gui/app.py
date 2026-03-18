@@ -25,6 +25,8 @@ from matchbook.gui import plot_area, sidebar, theme
 from matchbook.gui.file_panel import FilePanel
 from matchbook.gui.parameter_panel import ParameterPanel
 from matchbook.gui.pipeline_view import PipelineView
+from matchbook.gui.debug_console import DebugConsole
+from matchbook.gui.span_select_session import SpanSelectSession
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,7 @@ class MatchbookApp:
         self._data_service = data_service
         self._registry = registry
         self._database = database
+        self._echo_calls = False   # for debugging: set to True to log all calls to the console
 
         # -- Root window -----------------------------------------------
         self.root = tk.Tk()
@@ -110,6 +113,8 @@ class MatchbookApp:
             self._manual_y_max[gk] = tk.StringVar(value="")
 
         self._redraw_pending = False
+        self._span_session: SpanSelectSession | None = None
+        self._debug_console: DebugConsole | None = None
 
         # -- Build layout ----------------------------------------------
         self._build_ui()
@@ -134,7 +139,7 @@ class MatchbookApp:
         )
 
         # Left: sidebar
-        sidebar.build_sidebar(
+        _sidebar_frame, self._series_body = sidebar.build_sidebar(
             self.root,
             self._series_names,
             self._series_vars,
@@ -164,6 +169,7 @@ class MatchbookApp:
                 all_step_descs,
                 on_param_changed=self._on_param_changed,
                 on_run_from=self._on_run_from,
+                on_activate_span_session=self._start_span_session,
             )
 
             # Pipeline view inside the parameter panel
@@ -190,6 +196,16 @@ class MatchbookApp:
         self._toolbar.update()
         self._canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
+        # Debug console toggle — small button on the toolbar + Ctrl+` shortcut
+        debug_btn = tk.Button(
+            self._toolbar, text="⚙ Debug",
+            font=("TkDefaultFont", 8),
+            relief="flat", padx=4, pady=1,
+            command=self._toggle_debug_console,
+        )
+        debug_btn.pack(side=tk.RIGHT, padx=4)
+        self.root.bind("<Control-grave>", lambda _e: self._toggle_debug_console())
+
     # -----------------------------------------------------------------
     # Redraw
     # -----------------------------------------------------------------
@@ -202,6 +218,12 @@ class MatchbookApp:
 
     def _do_redraw(self) -> None:
         self._redraw_pending = False
+
+        # While a span selection session is active, delegate entirely to it
+        if self._span_session is not None:
+            self._span_session.draw_current_trace()
+            self._canvas.draw_idle()
+            return
 
         active_series = [
             name for name in self._series_names
@@ -240,14 +262,82 @@ class MatchbookApp:
         """Called when data is added/removed — refresh the series list and redraw."""
         new_series = sorted(self._data_service.list_series())
         if new_series != self._series_names:
-            # A new series appeared — add its toggle
+            # Add a toggle var for each new series
             for name in new_series:
                 if name not in self._series_vars:
                     v = tk.BooleanVar(value=True)
                     v.trace_add("write", lambda *_a: self._schedule_redraw())
                     self._series_vars[name] = v
             self._series_names = new_series
+            # Rebuild the series checkboxes in the sidebar
+            sidebar.refresh_series_section(
+                self._series_body, self._series_names, self._series_vars)
         self._schedule_redraw()
+
+    # -----------------------------------------------------------------
+    # Span selection session
+    # -----------------------------------------------------------------
+
+    def _start_span_session(
+        self,
+        step_id: str,
+        param_desc: Any,
+        controls_frame: Any,
+        on_done: Any,
+        on_cancel: Any,
+    ) -> None:
+        """Activate a per-trace span selection session.
+
+        Fetches time-domain traces from the DataService (references first),
+        creates a SpanSelectSession, and hands control of the plot over to
+        it until the user finishes or cancels.
+        """
+        import json
+
+        data_group = getattr(param_desc, "data_group", "time_domain")
+
+        # Collect traces, annotating with data_type for sorting
+        raw: list[tuple[str, Any, Any, str]] = []
+        for sid in self._data_service.list_series():
+            entry = self._data_service.get(
+                DataKey(sid, data_group, "mean"))
+            if entry is None:
+                continue
+            meta = self._data_service.get(DataKey(sid, "_meta", "grouping"))
+            dtype = (meta.metadata.get("data_type", "sample")
+                     if meta else "sample")
+            raw.append((sid, entry.x, entry.y, dtype))
+
+        if not raw:
+            logger.warning("No %s/mean traces found for span session", data_group)
+            on_cancel()
+            return
+
+        # References first, then samples, both sorted by series_id
+        order = {"reference": 0, "sample": 1}
+        raw.sort(key=lambda r: (order.get(r[3], 1), r[0]))
+        traces = [(sid, t, y) for sid, t, y, _ in raw]
+
+        def _on_complete(results: dict) -> None:
+            self._span_session = None
+            results_json = json.dumps(results)
+            on_done(results_json, len(results))
+            self._schedule_redraw()
+
+        def _on_session_cancel() -> None:
+            self._span_session = None
+            on_cancel()
+            self._schedule_redraw()
+
+        self._span_session = SpanSelectSession(
+            fig=self._fig,
+            canvas=self._canvas,
+            traces=traces,
+            controls_frame=controls_frame,
+            on_complete=_on_complete,
+            on_cancel=_on_session_cancel,
+        )
+        self._span_session.start()
 
     # -----------------------------------------------------------------
     # Pipeline interaction callbacks
@@ -341,6 +431,29 @@ class MatchbookApp:
             self._database.load_series(sid, self._data_service)
 
         self._schedule_redraw()
+
+    # -----------------------------------------------------------------
+    # Debug console
+    # -----------------------------------------------------------------
+
+    def _toggle_debug_console(self) -> None:
+        """Show or hide the debug REPL console."""
+        import numpy as np
+        if self._debug_console is None:
+            self._debug_console = DebugConsole(
+                parent=self.root,
+                namespace={
+                    "app":      self,
+                    "ds":       self._data_service,
+                    "registry": self._registry,
+                    "pipeline": self._active_pipeline,
+                    "fig":      self._fig,
+                    "canvas":   self._canvas,
+                    "np":       np,
+                    "calls":      self._echo_calls,   # for toggling call logging from the console itself
+                },
+            )
+        self._debug_console.toggle()
 
     # -----------------------------------------------------------------
     # Run
