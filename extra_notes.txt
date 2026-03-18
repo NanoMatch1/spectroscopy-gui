@@ -4,6 +4,7 @@ Feature:
 3. Collapsible pipeline windows would be useful too.
 4. after align on peak has configured the ranges, a button to show them on a shared axes (to visualise the alignment) would be useful. This can be in the main window, or a separate pop up window, whichever is the best compromise between simplicity in the code and cleanness.
 5. Std error currently adds a trace to the time domain, and presumably other groups in the sidebar when we get there. It would be better to condense the std error into a channel/width of shaded area around the averaged trace to show the error on the other traces.
+6. If an acc file exists with the same filename as a dat file, we shouldn't load the dat. The dat is only there if there's no acc, but in reality we should never use it because it throws away statistical power since its just the average of all acquisitions. In the future I think we'll move away from using it entirely.
 
 Bugs:
 1. Clicking on the checkboxes or updating the plot by zooming reshapes the plot size/boundaries inside the main window in width, usually making them smaller in width. It can be temporarilly restored by updating the figure through interaction with the GUI. The plot figure window should maintian the same width always (it should not appear to change shape when toggling series).

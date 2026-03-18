@@ -156,6 +156,29 @@ class DataService:
                 continue
             results.append(entry)
         return results
+    
+    def report_data_summary(self) -> None:
+        """Print a summary of the current data store contents."""
+        print("DataService Summary:")
+        series_ids = self.list_series()
+        print(f"  Total series: {len(series_ids)}")
+        for sid in series_ids:
+            groups = self.list_groups(sid)
+            print(f"  - {sid}: {len(groups)} groups")
+            metadata_entries = self.query(series_id=sid, group="_meta")
+            if metadata_entries:
+                print(metadata_entries)
+
+            for grp in groups:
+                names = self.list_names(sid, grp)
+                print(f"    - {grp}: {len(names)} entries")
+
+    def report_metadata_summary(self) -> None:
+        """Print a summary of all metadata entries."""
+        print("Metadata Summary:")
+        for filename, entry in self._store.items():
+            if entry.metadata:
+                print(f"  {filename}: {entry.metadata}")
 
     # -- tags ------------------------------------------------------------------
 

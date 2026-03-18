@@ -49,8 +49,10 @@ def main() -> None:
         title="Matchbook — THz TDS",
         database=db,
     )
+    # breakpoint()
     app.run()
 
 
 if __name__ == "__main__":
     main()
+    # breakpoint()
