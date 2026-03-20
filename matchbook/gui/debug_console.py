@@ -1,23 +1,26 @@
 """Embedded REPL debug console.
 
-Provides an interactive Python interpreter inside a ``Toplevel`` window.
-The namespace is pre-loaded with live references to the application's
-key objects so that any internal state can be inspected or mutated
-without restarting the GUI.
+Provides an interactive Python interpreter plus a Script editor inside a
+``Toplevel`` window.  The namespace is pre-loaded with live references to
+the application's key objects and developer shortcuts.
 
-Usage (from app.py)::
+Pre-loaded names
+----------------
+app, ds, registry, pipeline, fig, canvas, np
+    Live application objects.
+scripts  (:class:`~matchbook.gui.dev_kit.DevKit`)
+    Workflow shortcuts — type ``scripts.help()`` for a full list.
+tracer   (:class:`~matchbook.gui.dev_kit.CallTracer`)
+    Wraps methods/functions to echo their calls to this window,
+    even when triggered from Tkinter events outside the REPL.
+DataKey
+    Shortcut for ``matchbook.core.data_service.DataKey``.
 
-    console = DebugConsole(root, namespace={
-        'app':      self,
-        'ds':       self._data_service,
-        'registry': self._registry,
-        'pipeline': self._active_pipeline,
-        'fig':      self._fig,
-        'canvas':   self._canvas,
-        'np':       numpy,
-    })
-    console.toggle()          # show / hide
-    root.bind('<Control-`>',  lambda _e: console.toggle())
+Keyboard shortcuts
+------------------
+Ctrl+\`   toggle show/hide
+Up/Down   cycle command history (REPL tab)
+Tab       insert 4 spaces (REPL tab)
 """
 
 from __future__ import annotations
@@ -55,15 +58,15 @@ class _WidgetWriter:
 # ---------------------------------------------------------------------------
 
 class DebugConsole:
-    """Interactive Python REPL in a detached Toplevel window.
+    """Interactive Python REPL + Script editor in a detached Toplevel window.
 
     Parameters
     ----------
     parent :
-        The root Tk window (used as the Toplevel's parent).
+        The root Tk window.
     namespace :
-        Dict of names pre-injected into the interpreter.  Typically
-        includes ``app``, ``ds``, ``pipeline``, ``fig``, ``np``, etc.
+        Names pre-injected into the interpreter.  ``scripts``, ``tracer``,
+        and ``DataKey`` are added automatically.
     title :
         Window title.
     """
@@ -78,22 +81,41 @@ class DebugConsole:
         title: str = "Debug Console",
     ) -> None:
         self._parent = parent
-        self._namespace = namespace
         self._title = title
+
+        # Output widget — None until window is first built
+        self._output: tk.Text | None = None
+
+        # Extend namespace with dev-kit objects
+        from matchbook.core.data_service import DataKey
+        from matchbook.gui.dev_kit import CallTracer, DevKit
+
+        tracer = CallTracer(write_fn=self._write_trace)
+        scripts = DevKit(
+            app=namespace.get("app"),
+            data_service=namespace.get("ds"),
+            pipeline=namespace.get("pipeline"),
+            namespace=namespace,
+        )
+        namespace.update({
+            "scripts": scripts,
+            "tracer":  tracer,
+            "DataKey": DataKey,
+        })
+        self._namespace = namespace
 
         self._window: tk.Toplevel | None = None
         self._history: list[str] = []
         self._history_idx: int = -1
-        self._pending_lines: list[str] = []   # accumulates multi-line input
+        self._pending_lines: list[str] = []
         self._console: code.InteractiveConsole | None = None
-        self._echo_calls = False   # for debugging: set to True to log all calls to the console
 
     # ------------------------------------------------------------------
     # Public
     # ------------------------------------------------------------------
 
     def toggle(self) -> None:
-        """Show the console if hidden; hide it if visible."""
+        """Show if hidden, hide if visible."""
         if self._window is None or not self._window.winfo_exists():
             self._build_window()
         elif self._window.winfo_viewable():
@@ -113,12 +135,6 @@ class DebugConsole:
         if self._window and self._window.winfo_exists():
             self._window.withdraw()
 
-    def echo_calls(self) -> None:
-        """When enabled, every call to the console will be logged to stdout."""
-        self._parent._echo_calls = not self._parent._echo_calls
-        print(f"DebugConsole: echo_calls set to {self._parent._echo_calls}")
-        
-
     # ------------------------------------------------------------------
     # Window construction
     # ------------------------------------------------------------------
@@ -126,17 +142,32 @@ class DebugConsole:
     def _build_window(self) -> None:
         self._window = tk.Toplevel(self._parent)
         self._window.title(self._title)
-        self._window.geometry("760x400")
-        self._window.minsize(500, 200)
+        self._window.geometry("820x520")
+        self._window.minsize(500, 300)
 
-        # Use a monospace font
-        mono = tkfont.Font(family="Consolas", size=10)
-        if "Consolas" not in tkfont.families():
-            mono = tkfont.Font(family="Courier New", size=10)
+        mono = self._monospace_font()
 
-        # Output area
-        out_frame = ttk.Frame(self._window)
-        out_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=(4, 0))
+        notebook = ttk.Notebook(self._window)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        # -- Tab 1: REPL -----------------------------------------------
+        repl_frame = ttk.Frame(notebook)
+        notebook.add(repl_frame, text="  REPL  ")
+        self._build_repl_tab(repl_frame, mono)
+
+        # -- Tab 2: Script editor --------------------------------------
+        script_frame = ttk.Frame(notebook)
+        notebook.add(script_frame, text="  Script  ")
+        self._build_script_tab(script_frame, mono)
+
+        self._window.protocol("WM_DELETE_WINDOW", self._window.withdraw)
+        self._console = code.InteractiveConsole(locals=self._namespace)
+        self._write_banner()
+
+    def _build_repl_tab(self, parent: ttk.Frame, mono: Any) -> None:
+        # Output pane
+        out_frame = ttk.Frame(parent)
+        out_frame.pack(fill=tk.BOTH, expand=True)
 
         self._output = tk.Text(
             out_frame,
@@ -154,27 +185,25 @@ class DebugConsole:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self._output.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Colour tags
-        self._output.tag_configure("stdout", foreground="#d4d4d4")
-        self._output.tag_configure("stderr", foreground="#f48771")
-        self._output.tag_configure("prompt", foreground="#569cd6")
-        self._output.tag_configure("result", foreground="#9cdcfe")
+        self._output.tag_configure("stdout",  foreground="#d4d4d4")
+        self._output.tag_configure("stderr",  foreground="#f48771")
+        self._output.tag_configure("prompt",  foreground="#569cd6")
+        self._output.tag_configure("result",  foreground="#9cdcfe")
+        self._output.tag_configure("trace",   foreground="#4ec9b0")
 
-        # Separator
-        ttk.Separator(self._window, orient=tk.HORIZONTAL).pack(
-            fill=tk.X, padx=4, pady=2)
+        ttk.Separator(parent, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=2)
 
         # Input row
-        input_frame = ttk.Frame(self._window)
-        input_frame.pack(fill=tk.X, padx=4, pady=(0, 4))
+        input_row = ttk.Frame(parent)
+        input_row.pack(fill=tk.X, padx=4, pady=(0, 4))
 
         self._prompt_lbl = ttk.Label(
-            input_frame, text=self._PROMPT_PS1, font=mono,
+            input_row, text=self._PROMPT_PS1, font=mono,
             foreground="#569cd6", background="#1e1e1e", width=4)
         self._prompt_lbl.pack(side=tk.LEFT)
 
         self._entry = tk.Entry(
-            input_frame,
+            input_row,
             font=mono,
             background="#252526",
             foreground="#d4d4d4",
@@ -184,67 +213,92 @@ class DebugConsole:
         self._entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self._entry.focus_set()
 
-        # Key bindings on entry
         self._entry.bind("<Return>", self._on_return)
         self._entry.bind("<Up>",     self._on_history_up)
         self._entry.bind("<Down>",   self._on_history_down)
         self._entry.bind("<Tab>",    self._on_tab)
 
-        # Closing the window just hides it
-        self._window.protocol("WM_DELETE_WINDOW", self._window.withdraw)
+    def _build_script_tab(self, parent: ttk.Frame, mono: Any) -> None:
+        """Multi-line editor for paste-and-run scripts."""
+        toolbar = ttk.Frame(parent)
+        toolbar.pack(fill=tk.X, padx=4, pady=(4, 2))
 
-        # Build interpreter and print banner
-        self._console = code.InteractiveConsole(locals=self._namespace)
-        self._write_banner()
+        ttk.Label(toolbar,
+                  text="Paste or type a multi-line script, then click Run.",
+                  foreground="grey").pack(side=tk.LEFT)
+
+        ttk.Button(toolbar, text="▶  Run Script",
+                   command=self._run_script).pack(side=tk.RIGHT)
+        ttk.Button(toolbar, text="Clear",
+                   command=self._clear_script).pack(side=tk.RIGHT, padx=(0, 4))
+
+        editor_frame = ttk.Frame(parent)
+        editor_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0, 4))
+
+        self._script_editor = tk.Text(
+            editor_frame,
+            font=mono,
+            background="#1e1e1e",
+            foreground="#d4d4d4",
+            insertbackground="white",
+            relief="flat",
+            borderwidth=0,
+            undo=True,
+        )
+        sc_scroll = ttk.Scrollbar(editor_frame, command=self._script_editor.yview)
+        self._script_editor.configure(yscrollcommand=sc_scroll.set)
+        sc_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._script_editor.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._script_editor.bind("<Tab>", lambda e: (
+            self._script_editor.insert(tk.INSERT, "    "), "break")[1])
+
+        # Pre-populate with a starter comment
+        starter = (
+            "# Script tab — runs in the same namespace as the REPL.\n"
+            "# Output appears in the REPL tab.\n"
+            "# Example:\n"
+            "#   scripts.load()\n"
+            "#   scripts.run('align_on_peak')\n"
+            "#   scripts.series()\n"
+        )
+        self._script_editor.insert("1.0", starter)
+
+    # ------------------------------------------------------------------
+    # Banner
+    # ------------------------------------------------------------------
 
     def _write_banner(self) -> None:
         keys = ", ".join(sorted(self._namespace.keys()))
         banner = (
             f"Matchbook debug console  —  Python {sys.version.split()[0]}\n"
-            f"Available names: {keys}\n"
-            f"Type help(obj) or dir(obj) to inspect.  Ctrl+` to toggle.\n"
+            f"Names: {keys}\n"
+            "Type  scripts.help()  for workflow shortcuts.\n"
+            "Type  help(obj)  or  dir(obj)  to inspect anything.\n"
+            "Ctrl+`  toggles this window.\n"
         )
         self._write(banner, "result")
-        self._write_prompt()
 
     # ------------------------------------------------------------------
-    # Input handling
+    # REPL input handling
     # ------------------------------------------------------------------
 
     def _on_return(self, _event: Any) -> str:
         line = self._entry.get()
         self._entry.delete(0, tk.END)
 
-        # Echo input with prompt
         prompt = self._PROMPT_PS2 if self._pending_lines else self._PROMPT_PS1
         self._write(prompt + line + "\n", "prompt")
 
-        # History
         if line.strip():
             self._history.append(line)
         self._history_idx = -1
 
-        # Push to interpreter
         self._pending_lines.append(line)
         source = "\n".join(self._pending_lines)
 
-        old_stdout = sys.stdout
-        old_stderr = sys.stderr
-        sys.stdout = _WidgetWriter(self._output, "stdout")
-        sys.stderr = _WidgetWriter(self._output, "stderr")
-        try:
-            needs_more = self._console.push(source)  # type: ignore[union-attr]
-        finally:
-            sys.stdout = old_stdout
-            sys.stderr = old_stderr
-
-        if needs_more:
-            self._prompt_lbl.configure(text=self._PROMPT_PS2)
-        else:
-            self._pending_lines.clear()
-            self._prompt_lbl.configure(text=self._PROMPT_PS1)
-
-        self._write_prompt()
+        self._exec_with_redirect(lambda: self._console.push(source),  # type: ignore[union-attr]
+                                  returns_needs_more=True)
         return "break"
 
     def _on_history_up(self, _event: Any) -> str:
@@ -270,7 +324,6 @@ class DebugConsole:
         return "break"
 
     def _on_tab(self, _event: Any) -> str:
-        """Insert four spaces (basic indent support for multi-line input)."""
         self._entry.insert(tk.INSERT, "    ")
         return "break"
 
@@ -279,15 +332,76 @@ class DebugConsole:
         self._entry.insert(0, text)
 
     # ------------------------------------------------------------------
+    # Script tab actions
+    # ------------------------------------------------------------------
+
+    def _run_script(self) -> None:
+        source = self._script_editor.get("1.0", tk.END).strip()
+        if not source:
+            return
+        self._write("# --- running script ---\n", "prompt")
+
+        def _exec():
+            exec(compile(source, "<script>", "exec"), self._namespace)  # noqa: S102
+            return False  # never needs_more
+
+        self._exec_with_redirect(_exec, returns_needs_more=False)
+        self._write("# --- done ---\n", "prompt")
+
+    def _clear_script(self) -> None:
+        self._script_editor.delete("1.0", tk.END)
+
+    # ------------------------------------------------------------------
+    # Execution helper
+    # ------------------------------------------------------------------
+
+    def _exec_with_redirect(self, fn: Any, *, returns_needs_more: bool) -> None:
+        """Execute *fn* with stdout/stderr redirected to the output widget."""
+        old_out, old_err = sys.stdout, sys.stderr
+        assert self._output is not None
+        sys.stdout = _WidgetWriter(self._output, "stdout")
+        sys.stderr = _WidgetWriter(self._output, "stderr")
+        try:
+            result = fn()
+            if returns_needs_more:
+                needs_more: bool = result
+            else:
+                needs_more = False
+        finally:
+            sys.stdout = old_out
+            sys.stderr = old_err
+
+        if needs_more:
+            self._prompt_lbl.configure(text=self._PROMPT_PS2)
+        else:
+            self._pending_lines.clear()
+            self._prompt_lbl.configure(text=self._PROMPT_PS1)
+
+    # ------------------------------------------------------------------
     # Output helpers
     # ------------------------------------------------------------------
 
     def _write(self, text: str, tag: str = "stdout") -> None:
+        """Write to the output pane.  Safe to call before window is built."""
+        if self._output is None:
+            return
         self._output.configure(state="normal")
         self._output.insert("end", text, tag)
         self._output.configure(state="disabled")
         self._output.see("end")
 
-    def _write_prompt(self) -> None:
-        # The prompt is shown in the label, not the output area — nothing to do
-        pass
+    def _write_trace(self, text: str) -> None:
+        """Write callback used by CallTracer — always routes to the widget."""
+        self._write(text, "trace")
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _monospace_font() -> tkfont.Font:
+        families = tkfont.families()
+        for name in ("Consolas", "Cascadia Code", "Courier New", "Courier"):
+            if name in families:
+                return tkfont.Font(family=name, size=10)
+        return tkfont.Font(family="TkFixedFont", size=10)

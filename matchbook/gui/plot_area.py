@@ -167,4 +167,4 @@ def redraw(
         saved_xlim[gkey] = ax.get_xlim()
         saved_ylim[gkey] = ax.get_ylim()
 
-    fig.set_tight_layout(True)
+

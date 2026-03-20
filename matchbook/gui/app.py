@@ -55,6 +55,8 @@ class MatchbookApp:
         self._registry = registry
         self._database = database
         self._echo_calls = False   # for debugging: set to True to log all calls to the console
+        self.script_dir = os.path.abspath(__file__)
+        # self.dev_dir = os.path.join(self.script_dir., "dev_script.py")
 
         # -- Root window -----------------------------------------------
         self.root = tk.Tk()
@@ -190,7 +192,7 @@ class MatchbookApp:
         self._plot_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True,
                               padx=6, pady=6)
 
-        self._fig = Figure(figsize=(10, 7), dpi=100, tight_layout=True)
+        self._fig = Figure(figsize=(10, 7), dpi=100, layout="constrained")
         self._canvas = FigureCanvasTkAgg(self._fig, master=self._plot_frame)
         self._toolbar = NavigationToolbar2Tk(self._canvas, self._plot_frame)
         self._toolbar.update()
@@ -451,6 +453,8 @@ class MatchbookApp:
                     "canvas":   self._canvas,
                     "np":       np,
                     "calls":      self._echo_calls,   # for toggling call logging from the console itself
+                    "data":       self._data_service.report_data,  # alias for convenience
+                    "datfiles":       self._data_service.remove_redundant_dat
                 },
             )
         self._debug_console.toggle()

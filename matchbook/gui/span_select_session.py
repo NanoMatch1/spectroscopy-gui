@@ -246,8 +246,6 @@ class SpanSelectSession:
                 transform=ax.transAxes, va="top", ha="left", fontsize=8,
                 bbox=dict(boxstyle="round,pad=0.2", alpha=0.15))
 
-        self._fig.tight_layout()
-
         self._span_selector = SpanSelector(
             ax,
             self._on_span,

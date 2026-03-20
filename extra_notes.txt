@@ -1,10 +1,10 @@
 Feature:
 1. series autonaming - lets create a nested collapsible checkbox list that has the series name as the top level (currently using folder name), and the filename as the following level. Once grouping is done, if "series" is a grouping keyword, lets rename and group the series to the extracted string here. Note that multiple folders and series may be added over time, so this needs to support reassigning of series and adding to the checkbox nested lists dynamically.
-2. It would be useful to have a feature that removes series from the processing list or workflow. Lets start with, if the file is not in the "load from disk" section as "loaded" or from the database section, it should be remove from the series panel and from the data service as a whole.
-3. Collapsible pipeline windows would be useful too.
-4. after align on peak has configured the ranges, a button to show them on a shared axes (to visualise the alignment) would be useful. This can be in the main window, or a separate pop up window, whichever is the best compromise between simplicity in the code and cleanness.
-5. Std error currently adds a trace to the time domain, and presumably other groups in the sidebar when we get there. It would be better to condense the std error into a channel/width of shaded area around the averaged trace to show the error on the other traces.
-6. If an acc file exists with the same filename as a dat file, we shouldn't load the dat. The dat is only there if there's no acc, but in reality we should never use it because it throws away statistical power since its just the average of all acquisitions. In the future I think we'll move away from using it entirely.
+2. I want a button/feature for removing a data series from the data service, not just unchecking it.
+3. I've created a DataService.remove_redundant_dat to remove .dat files when an .acc exists. Its a good starting point to clean up the loaded data, since .dat is really only there for redundancy purposes, but perhaps it should be filtered at the load stage, so that it never loads .dat if an .acc of the same name is present.  
+4. Collapsible pipeline windows would be useful too.
+5. after align on peak has configured the ranges, a button to show them on a shared axes (to visualise the alignment) would be useful. This can be in the main window, or a separate pop up window, whichever is the best compromise between simplicity in the code and cleanness.
+6. Std error currently adds a trace to the time domain, and presumably other groups in the sidebar when we get there. It would be better to condense the std error into a channel/width of shaded area around the averaged trace to show the error on the other traces.
 
 Bugs:
 1. Clicking on the checkboxes or updating the plot by zooming reshapes the plot size/boundaries inside the main window in width, usually making them smaller in width. It can be temporarilly restored by updating the figure through interaction with the GUI. The plot figure window should maintian the same width always (it should not appear to change shape when toggling series).

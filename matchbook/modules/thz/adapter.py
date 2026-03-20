@@ -10,6 +10,7 @@ Delete this file and the rest of the THz package works standalone.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -152,6 +153,18 @@ def step_load_from_files(
         file_paths = [p.strip() for p in file_paths.splitlines() if p.strip()]
     if not file_paths:
         return
+
+    # Suppress .dat files when an .acc with the same stem exists in the batch.
+    # .dat files are averages-only and throw away statistical power; .acc is preferred.
+    acc_stems = {
+        Path(p).stem.lower()
+        for p in file_paths
+        if Path(p).suffix.lower() == ".acc"
+    }
+    file_paths = [
+        p for p in file_paths
+        if not (Path(p).suffix.lower() == ".dat" and Path(p).stem.lower() in acc_stems)
+    ]
 
     # Ensure loader modules are imported (triggers @register_loader)
     import matchbook.io.loaders  # noqa: F401

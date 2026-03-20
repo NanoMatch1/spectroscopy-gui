@@ -50,6 +50,7 @@ def main() -> None:
         database=db,
     )
     # breakpoint()
+    
     app.run()
 
 

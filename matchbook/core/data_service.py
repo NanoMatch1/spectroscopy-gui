@@ -35,6 +35,10 @@ class DataKey:
     group: str
     name: str
 
+    def key_tuple(self) -> tuple[str, str, str]:
+        """Return the key as a tuple (series_id, group, name), for interacting with data store."""
+        return (self.series_id, self.group, self.name)
+
 
 @dataclass
 class DataEntry:
@@ -157,7 +161,7 @@ class DataService:
             results.append(entry)
         return results
     
-    def report_data_summary(self) -> None:
+    def report_data(self) -> None:
         """Print a summary of the current data store contents."""
         print("DataService Summary:")
         series_ids = self.list_series()
@@ -173,14 +177,30 @@ class DataService:
                 names = self.list_names(sid, grp)
                 print(f"    - {grp}: {len(names)} entries")
 
-    def report_metadata_summary(self) -> None:
+    def report_metadata(self) -> None:
         """Print a summary of all metadata entries."""
         print("Metadata Summary:")
         for filename, entry in self._store.items():
             if entry.metadata:
-                print(f"  {filename}: {entry.metadata}")
-
-    # -- tags ------------------------------------------------------------------
+                print("  - Entry key:", filename)
+                for meta_key, meta_value in entry.metadata.items():
+                    print(f"   >  {meta_key}: {meta_value}")
+                # print(f"  {filename}: {entry.metadata}")
+    
+    def remove_redundant_dat(self) -> None:
+        """Remove redundant 'dat' entries that already have an entry as ".acc" files"""
+        redundant_keys = []
+        for entry_key, entry in self._store.items():
+            series_id = entry.key.series_id
+            if series_id.endswith(".dat"):
+                data_key = entry.key
+                key_tuple = data_key.key_tuple()
+                acc_key_tuple = (key_tuple[0].replace(".dat", ".acc"), key_tuple[1], key_tuple[2])
+                if acc_key_tuple in self._store:
+                    redundant_keys.append(entry_key)
+        for key_tuple in redundant_keys:
+            self.remove(DataKey(*key_tuple))
+            print(f"Removed redundant entry: {key_tuple}")
 
     def tag_series(self, series_id: str, *tags: str) -> None:
         """Attach one or more tags to a series."""
