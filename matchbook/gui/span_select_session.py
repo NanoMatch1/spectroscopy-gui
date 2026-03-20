@@ -200,6 +200,7 @@ class SpanSelectSession:
 
         self._fig.clear()
         ax = self._fig.add_subplot(111)
+        self._fig.subplots_adjust(left=0.10, right=0.97, top=0.92, bottom=0.10)
 
         ax.plot(t_arr, y_arr, color="steelblue", linewidth=1.2,
                 label="averaged")

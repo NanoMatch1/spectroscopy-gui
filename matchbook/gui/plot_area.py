@@ -47,8 +47,13 @@ def redraw(
         if any(trace_visibility.get(t.key, False) for t in g.traces)
     ]
 
+    # Fixed subplot margins keep axes boundaries stable across redraws.
+    # Without this, tick-label width changes shift the left edge on every toggle.
+    _ADJUST = dict(left=0.10, right=0.97, top=0.94, bottom=0.09, hspace=0.45)
+
     if not visible_groups or not active_series:
         ax = fig.add_subplot(111)
+        fig.subplots_adjust(**_ADJUST)
         ax.text(0.5, 0.5, "Select at least one series and one trace",
                 transform=ax.transAxes, ha="center", va="center",
                 fontsize=14, color="grey")
@@ -59,6 +64,7 @@ def redraw(
         return
 
     axes = fig.subplots(len(visible_groups), 1, squeeze=False)
+    fig.subplots_adjust(**_ADJUST)
 
     for row_idx, group_desc in enumerate(visible_groups):
         ax = axes[row_idx, 0]

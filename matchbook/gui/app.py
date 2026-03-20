@@ -192,7 +192,7 @@ class MatchbookApp:
         self._plot_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True,
                               padx=6, pady=6)
 
-        self._fig = Figure(figsize=(10, 7), dpi=100, layout="constrained")
+        self._fig = Figure(figsize=(10, 7), dpi=100)
         self._canvas = FigureCanvasTkAgg(self._fig, master=self._plot_frame)
         self._toolbar = NavigationToolbar2Tk(self._canvas, self._plot_frame)
         self._toolbar.update()
