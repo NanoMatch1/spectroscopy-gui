@@ -32,6 +32,7 @@ def build_sidebar(
     manual_y_min: dict[str, tk.StringVar],
     manual_y_max: dict[str, tk.StringVar],
     schedule_redraw: Callable[[], None],
+    on_remove_series: Callable[[str], None] | None = None,
 ) -> tuple[ttk.Frame, ttk.Frame]:
     """Build the full sidebar widget.
 
@@ -43,9 +44,8 @@ def build_sidebar(
         :func:`refresh_series_section` when new series arrive.
     """
 
-    sidebar = ttk.Frame(parent, width=theme.SIDEBAR_WIDTH)
-    sidebar.pack(side=tk.LEFT, fill=tk.Y, padx=(6, 0), pady=6)
-    sidebar.pack_propagate(False)
+    sidebar = ttk.Frame(parent)
+    sidebar.pack(fill=tk.BOTH, expand=True, padx=(4, 0), pady=6)
 
     canvas = tk.Canvas(sidebar, highlightthickness=0)
     scrollbar = ttk.Scrollbar(sidebar, orient=tk.VERTICAL, command=canvas.yview)
@@ -62,7 +62,8 @@ def build_sidebar(
     _bind_mousewheel(canvas)
 
     # -- Series section --
-    series_body = _build_series_section(inner, series_names, series_vars)
+    series_body = _build_series_section(
+        inner, series_names, series_vars, on_remove_series)
 
     ttk.Separator(inner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6, padx=4)
 
@@ -87,6 +88,7 @@ def refresh_series_section(
     series_body: ttk.Frame,
     series_names: list[str],
     series_vars: dict[str, tk.BooleanVar],
+    on_remove_series: Callable[[str], None] | None = None,
 ) -> None:
     """Rebuild the series checkboxes inside an existing series body frame.
 
@@ -96,17 +98,19 @@ def refresh_series_section(
     """
     for widget in series_body.winfo_children():
         widget.destroy()
-    _populate_series_body(series_body, series_names, series_vars)
+    _populate_series_body(series_body, series_names, series_vars,
+                          on_remove_series)
 
 
 def _build_series_section(
     parent: ttk.Frame,
     series_names: list[str],
     series_vars: dict[str, tk.BooleanVar],
+    on_remove_series: Callable[[str], None] | None = None,
 ) -> ttk.Frame:
     """Build the 'Series' collapsible section.  Returns the body frame."""
     body = _build_collapsible(parent, "Series")
-    _populate_series_body(body, series_names, series_vars)
+    _populate_series_body(body, series_names, series_vars, on_remove_series)
     return body
 
 
@@ -114,12 +118,17 @@ def _populate_series_body(
     body: ttk.Frame,
     series_names: list[str],
     series_vars: dict[str, tk.BooleanVar],
+    on_remove_series: Callable[[str], None] | None = None,
 ) -> None:
-    """Create one colour-coded checkbox per series name inside *body*."""
+    """Create one colour-coded checkbox per series name inside *body*.
+
+    Each row contains a toggle checkbox on the left and, when
+    *on_remove_series* is provided, a small '×' delete button on the right.
+    """
     for idx, name in enumerate(series_names):
         colour = theme.series_colour(idx)
         frame = ttk.Frame(body)
-        frame.pack(anchor="w", padx=4)
+        frame.pack(fill=tk.X, padx=4)
         cb = tk.Checkbutton(
             frame,
             text=f"  {name}",
@@ -129,7 +138,14 @@ def _populate_series_body(
             font=("TkDefaultFont", theme.SIDEBAR_FONT_SIZE, "bold"),
             anchor="w",
         )
-        cb.pack(anchor="w")
+        cb.pack(side=tk.LEFT, anchor="w")
+        if on_remove_series is not None:
+            tk.Button(
+                frame, text="×",
+                font=("TkDefaultFont", 7),
+                relief="flat", padx=2, pady=0, fg="grey",
+                command=lambda n=name: on_remove_series(n),
+            ).pack(side=tk.RIGHT, padx=(2, 0))
 
 
 def _build_group_section(

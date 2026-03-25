@@ -1,6 +1,6 @@
 When writing code for me, prioritize clarity, modularity, and long-term maintainability over cleverness or compactness.
 
-Use descriptive, explicit, and searchable names for variables, functions, classes, and files. Names should communicate purpose clearly and make the codebase easy to navigate through search.
+Use descriptive, explicit, and searchable names for variables, functions, classes, and files. Names should communicate purpose clearly and make the codebase easy to navigate through search, and should be mistaken for other names or packages. For instance, "pd" is not an appropriate name for a "processing dictionary" because (1) as a two letter name it is poorly searchable, and (2) it looks like an alias for the pandas module.
 
 Structure code in small, modular components with minimal coupling and minimal dependencies. Prefer dependency injection rather than hard-coding resources (e.g., file paths, hardware interfaces, configuration, services). Each component should have a clear responsibility and well-defined interfaces.
 

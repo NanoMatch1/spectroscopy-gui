@@ -132,7 +132,7 @@ class MatchbookApp:
     # -----------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        # Far left: file panel (collapsible, with optional database section)
+        # Far left: file panel — keeps its own collapse logic outside the paned area
         self._file_panel = FilePanel(
             self.root,
             on_load_requested=self._on_files_loaded,
@@ -140,9 +140,25 @@ class MatchbookApp:
             on_db_load_requested=self._on_db_load,
         )
 
-        # Left: sidebar
+        # Resizable paned area: sidebar | plot | parameter panel
+        # tk.PanedWindow is used (not ttk) for per-pane minsize and width support.
+        self._paned = tk.PanedWindow(
+            self.root, orient=tk.HORIZONTAL,
+            sashwidth=5, sashrelief=tk.GROOVE,
+        )
+        self._paned.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        _sidebar_pane = ttk.Frame(self._paned)
+        _plot_pane = ttk.Frame(self._paned)
+        _param_pane = ttk.Frame(self._paned)
+
+        self._paned.add(_sidebar_pane, minsize=120, width=260, stretch="never")
+        self._paned.add(_plot_pane,    minsize=300,             stretch="always")
+        self._paned.add(_param_pane,   minsize=120, width=300,  stretch="never")
+
+        # Sidebar pane
         _sidebar_frame, self._series_body = sidebar.build_sidebar(
-            self.root,
+            _sidebar_pane,
             self._series_names,
             self._series_vars,
             self._data_groups,
@@ -155,9 +171,10 @@ class MatchbookApp:
             self._manual_y_min,
             self._manual_y_max,
             self._schedule_redraw,
+            on_remove_series=self._on_remove_series,
         )
 
-        # Right: parameter panel (if any module has pipeline steps)
+        # Parameter panel pane
         all_step_descs = []
         self._active_pipeline: Pipeline | None = None
         for record in self._registry.registered_modules.values():
@@ -167,17 +184,17 @@ class MatchbookApp:
 
         if all_step_descs:
             self._param_panel = ParameterPanel(
-                self.root,
+                _param_pane,
                 all_step_descs,
                 on_param_changed=self._on_param_changed,
                 on_run_from=self._on_run_from,
                 on_activate_span_session=self._start_span_session,
             )
 
-            # Pipeline view inside the parameter panel
+            # Pipeline view sits in the fixed header above the scrollable params
             if self._active_pipeline is not None:
                 self._pipeline_view = PipelineView(
-                    self._param_panel.frame,
+                    self._param_panel.header_frame,
                     self._active_pipeline,
                     on_step_selected=self._on_step_selected,
                     on_run_from=self._on_run_from,
@@ -187,10 +204,9 @@ class MatchbookApp:
             self._param_panel = None
             self._pipeline_view = None
 
-        # Centre: plot area
-        self._plot_frame = ttk.Frame(self.root)
-        self._plot_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True,
-                              padx=6, pady=6)
+        # Plot pane — canvas fills the pane directly
+        self._plot_frame = ttk.Frame(_plot_pane)
+        self._plot_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
         self._fig = Figure(figsize=(10, 7), dpi=100)
         self._canvas = FigureCanvasTkAgg(self._fig, master=self._plot_frame)
@@ -264,17 +280,30 @@ class MatchbookApp:
         """Called when data is added/removed — refresh the series list and redraw."""
         new_series = sorted(self._data_service.list_series())
         if new_series != self._series_names:
-            # Add a toggle var for each new series
+            # Add toggle vars for newly arrived series
             for name in new_series:
                 if name not in self._series_vars:
                     v = tk.BooleanVar(value=True)
                     v.trace_add("write", lambda *_a: self._schedule_redraw())
                     self._series_vars[name] = v
+            # Remove vars for series that no longer exist
+            for name in list(self._series_vars):
+                if name not in new_series:
+                    del self._series_vars[name]
             self._series_names = new_series
             # Rebuild the series checkboxes in the sidebar
             sidebar.refresh_series_section(
-                self._series_body, self._series_names, self._series_vars)
+                self._series_body, self._series_names, self._series_vars,
+                on_remove_series=self._on_remove_series)
         self._schedule_redraw()
+
+    def _on_remove_series(self, series_id: str) -> None:
+        """Remove all data for a series from the DataService.
+
+        The DataService subscriber (_on_data_changed) handles the subsequent
+        sidebar refresh and redraw automatically.
+        """
+        self._data_service.clear_series(series_id)
 
     # -----------------------------------------------------------------
     # Span selection session
@@ -393,8 +422,11 @@ class MatchbookApp:
 
         path_str = "\n".join(file_paths)
 
-        # Derive a series ID from the common directory name
-        common_dir = os.path.commonpath(file_paths) if file_paths else ""
+        # Derive a series ID from the common parent directory.
+        # Using dirname first avoids os.path.commonpath returning a file path
+        # when only a single file is selected.
+        parent_dirs = [os.path.dirname(p) for p in file_paths]
+        common_dir = os.path.commonpath(parent_dirs) if parent_dirs else ""
         series_id = os.path.basename(common_dir) or "loaded"
 
         # Push file paths into the load step and run the full pipeline

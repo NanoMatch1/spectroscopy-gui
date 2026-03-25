@@ -67,11 +67,14 @@ class ParameterPanel:
         self._on_activate_span_session = on_activate_span_session
         self._param_widgets: dict[str, dict[str, tk.Variable]] = {}
 
-        self.frame = ttk.Frame(parent, width=250)
-        self.frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 6), pady=6)
-        self.frame.pack_propagate(False)
+        self.frame = ttk.Frame(parent)
+        self.frame.pack(fill=tk.BOTH, expand=True, padx=(0, 4), pady=6)
 
-        # Scrollable interior
+        # Fixed header area — pipeline view and other top-pinned widgets go here
+        self.header_frame = ttk.Frame(self.frame)
+        self.header_frame.pack(fill=tk.X)
+
+        # Scrollable interior — fills remaining space below the header
         canvas = tk.Canvas(self.frame, highlightthickness=0)
         scrollbar = ttk.Scrollbar(self.frame, orient=tk.VERTICAL,
                                    command=canvas.yview)
@@ -127,45 +130,52 @@ class ParameterPanel:
         step_id: str,
         param: ParameterDescriptor,
     ) -> None:
-        """Build a single parameter widget based on its type."""
-        row = ttk.Frame(parent)
-        row.pack(fill=tk.X, pady=2)
+        """Build a single parameter widget using a two-row stacked layout.
 
-        ttk.Label(row, text=param.label, width=18, anchor="w").pack(
-            side=tk.LEFT, padx=(0, 4))
+        The parameter label sits on its own row above the control widgets.
+        This prevents overflow in the fixed-width panel.
+        """
+        wrapper = ttk.Frame(parent)
+        wrapper.pack(fill=tk.X, pady=(2, 0))
+
+        ttk.Label(wrapper, text=param.label, anchor="w").pack(
+            anchor="w", padx=2)
+
+        control_row = ttk.Frame(wrapper)
+        control_row.pack(fill=tk.X, padx=4, pady=(0, 2))
 
         var: tk.Variable
 
         if param.type == ParamType.BOOL:
             var = tk.BooleanVar(value=bool(param.default))
-            ttk.Checkbutton(row, variable=var).pack(side=tk.LEFT)
+            ttk.Checkbutton(control_row, variable=var).pack(side=tk.LEFT)
 
         elif param.type == ParamType.CHOICE and param.choices:
             var = tk.StringVar(value=str(param.default))
-            cb = ttk.Combobox(row, textvariable=var, values=param.choices,
-                              state="readonly", width=12)
-            cb.pack(side=tk.LEFT)
+            cb = ttk.Combobox(control_row, textvariable=var,
+                               values=param.choices, state="readonly")
+            cb.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         elif param.type == ParamType.FILE_PATH:
             var = tk.StringVar(value=str(param.default))
-            entry = ttk.Entry(row, textvariable=var, width=14)
-            entry.pack(side=tk.LEFT, padx=(0, 2))
+            entry = ttk.Entry(control_row, textvariable=var)
+            entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
             ttk.Button(
-                row, text="...", width=3,
+                control_row, text="...", width=3,
                 command=lambda v=var: self._browse_file(v),
             ).pack(side=tk.LEFT)
 
         elif param.type in (ParamType.FLOAT, ParamType.INT):
             var = tk.StringVar(value=str(param.default))
             if param.min is not None and param.max is not None:
-                # Slider + entry
+                # Slider fills available width; fixed-width entry beside it
                 scale_var = tk.DoubleVar(value=float(param.default))
                 scale = ttk.Scale(
-                    row, from_=param.min, to=param.max,
-                    variable=scale_var, orient=tk.HORIZONTAL, length=100,
+                    control_row, from_=param.min, to=param.max,
+                    variable=scale_var, orient=tk.HORIZONTAL,
                 )
-                scale.pack(side=tk.LEFT)
-                entry = ttk.Entry(row, textvariable=var, width=8)
+                scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
+                entry = ttk.Entry(control_row, textvariable=var, width=7)
                 entry.pack(side=tk.LEFT, padx=2)
 
                 # Sync slider -> entry
@@ -177,29 +187,29 @@ class ParameterPanel:
                 scale.configure(command=_on_scale)
 
                 # Sync entry -> slider
-                def _on_entry(*_args, v=var, sv=scale_var, p=param):
+                def _on_entry(*_args, v=var, sv=scale_var):
                     try:
                         sv.set(float(v.get()))
                     except ValueError:
                         pass
                 var.trace_add("write", _on_entry)
             else:
-                entry = ttk.Entry(row, textvariable=var, width=14)
-                entry.pack(side=tk.LEFT)
+                entry = ttk.Entry(control_row, textvariable=var)
+                entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         elif param.type == ParamType.SPAN_SESSION:
             # A JSON-string var holds the per-series result dict.
             var = tk.StringVar(value=str(param.default))
             summary_var = tk.StringVar(value="Not configured")
-            ttk.Label(row, textvariable=summary_var,
+            ttk.Label(control_row, textvariable=summary_var,
                       font=("TkDefaultFont", theme.SIDEBAR_FONT_SIZE,
                             "italic")).pack(side=tk.LEFT)
 
-            # controls_frame: hidden when idle, populated by session
+            # controls_frame: hidden when idle, populated by the session
             controls_frame = ttk.Frame(parent)
             controls_frame.pack(fill=tk.X)
 
-            configure_btn = ttk.Button(row, text="Configure…", width=12)
+            configure_btn = ttk.Button(control_row, text="Configure…")
             configure_btn.pack(side=tk.LEFT, padx=(4, 0))
 
             def _on_done(results_json: str, n: int,
@@ -228,8 +238,8 @@ class ParameterPanel:
         else:
             # STRING or fallback
             var = tk.StringVar(value=str(param.default))
-            entry = ttk.Entry(row, textvariable=var, width=14)
-            entry.pack(side=tk.LEFT)
+            entry = ttk.Entry(control_row, textvariable=var)
+            entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         # Store and bind change notification
         self._param_widgets[step_id][param.name] = var
