@@ -139,8 +139,30 @@ class Pipeline:
 
     # -- execution -------------------------------------------------------------
 
+    def run_step(self, step_id: str, data_service: Any, series_id: str) -> None:
+        """Execute exactly *step_id* — no downstream steps are run.
+
+        Use this for manual step-by-step execution.  Downstream steps are
+        left with their existing cache state (stale if never run, or cached
+        from a previous run).  Call :meth:`invalidate_downstream` afterward
+        if you want those steps to appear pending in the UI.
+        """
+        self._snapshot_history()
+        step = self._steps[step_id]
+        self._notify("step_start", step_id)
+        step.fn(data_service, series_id, **step.params)
+        self._cache[step_id] = StepResult(
+            step_id=step_id,
+            params_snapshot=copy.deepcopy(step.params),
+        )
+        self._notify("step_done", step_id)
+
     def run_from(self, step_id: str, data_service: Any, series_id: str) -> None:
-        """Re-execute from *step_id* through all downstream steps."""
+        """Re-execute from *step_id* through all downstream steps.
+
+        Use this when you want to re-run a full chain after a parameter
+        change.  For single-step execution, use :meth:`run_step`.
+        """
         self._snapshot_history()
         idx = self._order.index(step_id)
         for sid in self._order[idx:]:
@@ -157,6 +179,18 @@ class Pipeline:
         """Execute the full pipeline from the first step."""
         if self._order:
             self.run_from(self._order[0], data_service, series_id)
+
+    def invalidate_downstream(self, step_id: str) -> None:
+        """Clear the cached result for every step *after* *step_id*.
+
+        Call this after :meth:`run_step` when upstream data has changed
+        (e.g. new files loaded) so the pipeline view correctly shows
+        downstream steps as pending rather than stale-with-old-cache.
+        """
+        idx = self._order.index(step_id)
+        for sid in self._order[idx + 1:]:
+            self._cache.pop(sid, None)
+        self._notify("param_changed", step_id)
 
     # -- staleness / cache -----------------------------------------------------
 

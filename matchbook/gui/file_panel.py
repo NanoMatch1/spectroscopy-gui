@@ -1,9 +1,11 @@
 """File and database browser panel — browse, load, search, and manage data.
 
-Provides a collapsible left panel with two sections:
+Provides a collapsible left panel with two tabs:
 
-* **Files** — browse disk, select files, and load them via the FileIngestor.
-* **Database** — search saved series and load them back into the DataService.
+* **Load** — browse disk, select files, load them via the FileIngestor,
+  and search / load from the database.
+* **Grouping** — table view of which reference is paired with each sample
+  after the group_files pipeline step has run.
 
 Completely generic — no domain-specific knowledge.
 """
@@ -16,6 +18,7 @@ import tkinter as tk
 from tkinter import filedialog, ttk
 from typing import Any, Callable
 
+from matchbook.core.data_service import DataKey, DataService
 from matchbook.gui import theme
 from matchbook.io.file_ingestor import FileIngestor, IngestReport
 from matchbook.io.loaders.registry import registered_extensions
@@ -24,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 class FilePanel:
-    """Collapsible left-side panel for file loading and database access.
+    """Collapsible left-side panel for file loading and grouping inspection.
 
     Parameters
     ----------
@@ -106,7 +109,7 @@ class FilePanel:
     # -----------------------------------------------------------------
 
     def _build_ui(self, width: int) -> None:
-        # ---- Collapse button at top of expanded panel ----
+        # ---- Header bar with collapse button ----
         top_bar = ttk.Frame(self._content)
         top_bar.pack(fill=tk.X, padx=6, pady=(6, 0))
 
@@ -120,10 +123,24 @@ class FilePanel:
             font=theme.SECTION_HEADER_FONT,
         ).pack(side=tk.LEFT, padx=(4, 0))
 
+        # ---- Tabbed content ----
+        self._notebook = ttk.Notebook(self._content)
+        self._notebook.pack(fill=tk.BOTH, expand=True, padx=4, pady=(4, 4))
+
+        load_tab = ttk.Frame(self._notebook)
+        self._notebook.add(load_tab, text="Load")
+        self._build_load_tab(load_tab, width)
+
+        grouping_tab = ttk.Frame(self._notebook)
+        self._notebook.add(grouping_tab, text="Grouping")
+        self._build_grouping_tab(grouping_tab)
+
+    def _build_load_tab(self, parent: ttk.Frame, width: int) -> None:
+        """Build the file browser + database sections inside the Load tab."""
         # ============================================================
         # Section 1 — Files
         # ============================================================
-        files_lf = ttk.LabelFrame(self._content, text="  Load from Disk  ")
+        files_lf = ttk.LabelFrame(parent, text="  Load from Disk  ")
         files_lf.pack(fill=tk.BOTH, expand=True, padx=6, pady=(6, 2))
 
         # Button bar
@@ -185,7 +202,7 @@ class FilePanel:
         # ============================================================
         # Section 2 — Database
         # ============================================================
-        db_lf = ttk.LabelFrame(self._content, text="  Database  ")
+        db_lf = ttk.LabelFrame(parent, text="  Database  ")
         db_lf.pack(fill=tk.BOTH, expand=True, padx=6, pady=(2, 6))
 
         # Search bar
@@ -236,12 +253,131 @@ class FilePanel:
         )
         self._db_load_btn.pack(fill=tk.X, padx=4, pady=(0, 6))
 
+    def _build_grouping_tab(self, parent: ttk.Frame) -> None:
+        """Build the grouping inspection table."""
+        top = ttk.Frame(parent)
+        top.pack(fill=tk.X, padx=6, pady=(6, 2))
+
+        ttk.Label(
+            top, text="Reference assignments after grouping",
+            font=("TkDefaultFont", 8), foreground="grey",
+        ).pack(side=tk.LEFT)
+
+        ttk.Button(
+            top, text="\u21BB Refresh", width=9,
+            command=self._on_grouping_refresh_clicked,
+        ).pack(side=tk.RIGHT)
+
+        tree_frame = ttk.Frame(parent)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
+
+        cols = ("type", "substrate_ref", "air_ref")
+        self._grouping_tree = ttk.Treeview(
+            tree_frame, columns=cols, show="tree headings",
+            selectmode="none",
+        )
+        self._grouping_tree.heading("#0",           text="Series / File")
+        self._grouping_tree.heading("type",         text="Type")
+        self._grouping_tree.heading("substrate_ref", text="Substrate ref")
+        self._grouping_tree.heading("air_ref",      text="Air ref")
+
+        self._grouping_tree.column("#0",           width=120, minwidth=80)
+        self._grouping_tree.column("type",         width=70,  minwidth=55,  stretch=False)
+        self._grouping_tree.column("substrate_ref", width=120, minwidth=80)
+        self._grouping_tree.column("air_ref",      width=100, minwidth=70)
+
+        # Colour tags for data types
+        self._grouping_tree.tag_configure("reference", foreground="#1565c0")
+        self._grouping_tree.tag_configure("sample",    foreground="#2e7d32")
+        self._grouping_tree.tag_configure("unknown",   foreground="#888888")
+
+        gsb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL,
+                            command=self._grouping_tree.yview)
+        self._grouping_tree.configure(yscrollcommand=gsb.set)
+        self._grouping_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        gsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Placeholder shown before first refresh
+        self._grouping_placeholder = ttk.Label(
+            parent,
+            text="Run the 'Group Files' pipeline step, then click Refresh.",
+            font=("TkDefaultFont", 8), foreground="grey", wraplength=260,
+            justify=tk.CENTER,
+        )
+        self._grouping_placeholder.pack(pady=8)
+
+        # Store reference for app to call without args
+        self._last_data_service: DataService | None = None
+
+    def _on_grouping_refresh_clicked(self) -> None:
+        if self._last_data_service is not None:
+            self.refresh_grouping(self._last_data_service)
+
+    # -----------------------------------------------------------------
+    # Public: update grouping table
+    # -----------------------------------------------------------------
+
+    def refresh_grouping(self, data_service: DataService) -> None:
+        """Repopulate the Grouping tab from current DataService state.
+
+        Reads ``_meta/grouping`` metadata and ``substrate_reference`` /
+        ``air_reference`` associations.  Groups sub-series under their
+        parent series folder as collapsible tree nodes.
+        """
+        self._last_data_service = data_service
+        self._grouping_tree.delete(*self._grouping_tree.get_children())
+
+        all_series = data_service.list_series()
+
+        # Collect series that have grouping metadata
+        grouped: dict[str, list[str]] = {}
+        for sid in all_series:
+            meta = data_service.get(DataKey(sid, "_meta", "grouping"))
+            if meta is None:
+                continue
+            parent = sid.rsplit("/", 1)[0] if "/" in sid else ""
+            grouped.setdefault(parent, []).append(sid)
+
+        if not grouped:
+            self._grouping_placeholder.pack(pady=8)
+            return
+
+        self._grouping_placeholder.pack_forget()
+
+        for parent_key in sorted(grouped):
+            # Insert a bold parent row for the series folder
+            parent_node = self._grouping_tree.insert(
+                "", tk.END,
+                text=parent_key or "(root)",
+                values=("", "", ""),
+                open=True,
+                tags=("group_header",),
+            )
+
+            for sid in sorted(grouped[parent_key]):
+                meta = data_service.get(DataKey(sid, "_meta", "grouping"))
+                data_type = meta.metadata.get("data_type", "unknown") if meta else "unknown"
+
+                substrate = data_service.get_association(sid, "substrate_reference") or ""
+                air       = data_service.get_association(sid, "air_reference") or ""
+
+                filename       = sid.split("/")[-1]
+                substrate_name = substrate.split("/")[-1] if substrate else "\u2014"
+                air_name       = air.split("/")[-1] if air else "\u2014"
+
+                tag = data_type if data_type in ("reference", "sample") else "unknown"
+                self._grouping_tree.insert(
+                    parent_node, tk.END,
+                    text=filename,
+                    values=(data_type, substrate_name, air_name),
+                    tags=(tag,),
+                )
+
     # -----------------------------------------------------------------
     # File selection actions
     # -----------------------------------------------------------------
 
     def _browse_files(self) -> None:
-        """Open a file dialog to select one or more data files."""
         ext_map = registered_extensions()
         filetypes = [
             ("All supported", " ".join(f"*{e}" for e in ext_map)),
@@ -256,7 +392,6 @@ class FilePanel:
             self._add_paths(list(paths))
 
     def _browse_folder(self) -> None:
-        """Open a folder dialog and add all supported files within it."""
         folder = filedialog.askdirectory(title="Select folder containing data files")
         if not folder:
             return
@@ -272,7 +407,6 @@ class FilePanel:
             self._add_paths(found)
 
     def _add_paths(self, paths: list[str]) -> None:
-        """Add new file paths (deduplicating against existing)."""
         existing = set(self._file_paths)
         added = 0
         for p in paths:
@@ -286,7 +420,6 @@ class FilePanel:
             self._update_summary()
 
     def _insert_tree_row(self, fpath: str, status: str = "pending") -> str:
-        """Insert a single file row into the treeview.  Returns the item ID."""
         filename = os.path.basename(fpath)
         ext = os.path.splitext(filename)[1].lower()
         iid = self._tree.insert(
@@ -297,7 +430,6 @@ class FilePanel:
         return iid
 
     def _remove_selected(self) -> None:
-        """Remove selected rows from the tree and the internal path list."""
         for iid in self._tree.selection():
             tags = self._tree.item(iid, "tags")
             if tags:
@@ -308,7 +440,6 @@ class FilePanel:
         self._update_summary()
 
     def _clear_all(self) -> None:
-        """Remove all files from the list."""
         self._tree.delete(*self._tree.get_children())
         self._file_paths.clear()
         self._update_summary()
@@ -330,7 +461,6 @@ class FilePanel:
     # -----------------------------------------------------------------
 
     def _on_load_clicked(self) -> None:
-        """Run the FileIngestor and show results, then fire callback."""
         if not self._file_paths:
             return
 
@@ -347,7 +477,6 @@ class FilePanel:
             self._on_load_requested(successful_paths)
 
     def _apply_ingest_report(self, report: IngestReport) -> None:
-        """Update tree statuses and summary from an IngestReport."""
         path_results = {os.path.normpath(ing.path): ing for ing in report.files}
 
         for iid in self._tree.get_children():
@@ -375,12 +504,10 @@ class FilePanel:
     # -----------------------------------------------------------------
 
     def _on_db_search(self) -> None:
-        """Fire the search callback with the current query text."""
         query = self._search_var.get().strip()
         self._on_db_search_requested(query)
 
     def _on_db_load(self) -> None:
-        """Fire the load callback with selected series IDs."""
         series_ids: list[str] = []
         for iid in self._db_tree.selection():
             tags = self._db_tree.item(iid, "tags")
@@ -390,11 +517,7 @@ class FilePanel:
             self._on_db_load_requested(series_ids)
 
     def show_db_results(self, results: list[dict[str, Any]]) -> None:
-        """Populate the database results treeview.
-
-        Each result dict should have keys: ``id``, ``display_name``,
-        ``module``, ``created_at`` (as returned by ``Database.search``).
-        """
+        """Populate the database results treeview."""
         self._db_tree.delete(*self._db_tree.get_children())
         for rec in results:
             display = rec.get("display_name") or rec.get("id", "?")
@@ -423,5 +546,4 @@ class FilePanel:
 
     @property
     def file_paths(self) -> list[str]:
-        """Current list of file paths (read-only copy)."""
         return list(self._file_paths)

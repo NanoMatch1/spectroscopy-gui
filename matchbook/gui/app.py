@@ -27,6 +27,7 @@ from matchbook.gui.parameter_panel import ParameterPanel
 from matchbook.gui.pipeline_view import PipelineView
 from matchbook.gui.debug_console import DebugConsole
 from matchbook.gui.span_select_session import SpanSelectSession
+from matchbook.gui.status_bar import StatusBar
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,10 @@ class MatchbookApp:
         # -- Subscribe to DataService changes --------------------------
         self._data_service.subscribe(self._on_data_changed)
 
+        # -- Subscribe to pipeline events for status bar ---------------
+        if self._active_pipeline is not None:
+            self._active_pipeline.subscribe(self._on_pipeline_event)
+
         # -- Initial draw ----------------------------------------------
         self._do_redraw()
 
@@ -132,6 +137,10 @@ class MatchbookApp:
     # -----------------------------------------------------------------
 
     def _build_ui(self) -> None:
+        # Status bar must be packed first (side=BOTTOM) so it reserves its
+        # strip before the other widgets claim all remaining space.
+        self._status_bar = StatusBar(self.root)
+
         # Far left: file panel — keeps its own collapse logic outside the paned area
         self._file_panel = FilePanel(
             self.root,
@@ -187,7 +196,7 @@ class MatchbookApp:
                 _param_pane,
                 all_step_descs,
                 on_param_changed=self._on_param_changed,
-                on_run_from=self._on_run_from,
+                on_run_step=self._on_run_step,
                 on_activate_span_session=self._start_span_session,
             )
 
@@ -385,8 +394,25 @@ class MatchbookApp:
         if self._pipeline_view is not None:
             self._pipeline_view.refresh()
 
+    def _on_run_step(self, step_id: str) -> None:
+        """Run exactly one pipeline step for all active series.
+
+        Used by the per-step '▶ Run' button in the parameter panel.
+        Does not cascade into downstream steps.
+        """
+        if self._active_pipeline is None:
+            return
+        for series_id in self._series_names:
+            if self._series_vars.get(series_id, tk.BooleanVar(value=False)).get():
+                self._active_pipeline.run_step(
+                    step_id, self._data_service, series_id)
+        self._schedule_redraw()
+
     def _on_run_from(self, step_id: str) -> None:
-        """Run the pipeline from the given step for all active series."""
+        """Run the pipeline from the given step through all downstream steps.
+
+        Used by 'Run from here' in the pipeline view.
+        """
         if self._active_pipeline is None:
             return
         for series_id in self._series_names:
@@ -394,6 +420,27 @@ class MatchbookApp:
                 self._active_pipeline.run_from(
                     step_id, self._data_service, series_id)
         self._schedule_redraw()
+
+    def _on_pipeline_event(self, event: str, step_id: str) -> None:
+        """React to pipeline step_start / step_done / rewind events."""
+        if self._active_pipeline is None:
+            return
+        step = self._active_pipeline.get_step(step_id) if step_id else None
+        name = step.name if step else step_id
+
+        if event == "step_start":
+            self._show_status(f"Running \u2018{name}\u2019\u2026", level="info")
+        elif event == "step_done":
+            self._show_status(f"\u2713 \u2018{name}\u2019 completed", level="success")
+            if step_id == "group_files":
+                self._file_panel.refresh_grouping(self._data_service)
+        elif event == "rewind":
+            n = self._active_pipeline.history_length
+            self._show_status(f"Pipeline rewound (history: {n})", level="info")
+
+    def _show_status(self, message: str, level: str = "info") -> None:
+        """Display a transient notification in the status bar."""
+        self._status_bar.show(message, level=level)
 
     def _on_step_selected(self, step_id: str) -> None:
         logger.debug(f"Pipeline step selected: {step_id}")
@@ -429,11 +476,14 @@ class MatchbookApp:
         common_dir = os.path.commonpath(parent_dirs) if parent_dirs else ""
         series_id = os.path.basename(common_dir) or "loaded"
 
-        # Push file paths into the load step and run the full pipeline
+        # Run only the load step — downstream steps are left for the user
+        # to run manually once they are satisfied with the loaded data.
         self._active_pipeline.set_param(
             "load_from_files", "file_paths", path_str)
-        self._active_pipeline.run_from(
+        self._active_pipeline.run_step(
             "load_from_files", self._data_service, series_id)
+        # Clear downstream caches so the pipeline view shows them as pending
+        self._active_pipeline.invalidate_downstream("load_from_files")
 
         # Refresh pipeline view
         if self._pipeline_view is not None:

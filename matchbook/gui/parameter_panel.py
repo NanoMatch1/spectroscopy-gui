@@ -41,7 +41,7 @@ class ParameterPanel:
         parent: tk.Widget,
         step_descriptors: list[PipelineStepDescriptor],
         on_param_changed: Callable[[str, str, Any], None],
-        on_run_from: Callable[[str], None],
+        on_run_step: Callable[[str], None],
         on_activate_span_session: SpanSessionActivator | None = None,
     ) -> None:
         """
@@ -54,16 +54,16 @@ class ParameterPanel:
         on_param_changed:
             Called as ``on_param_changed(step_id, param_name, new_value)``
             whenever a parameter widget changes.
-        on_run_from:
-            Called as ``on_run_from(step_id)`` when the user clicks
-            'Run from here'.
+        on_run_step:
+            Called as ``on_run_step(step_id)`` when the user clicks the
+            per-step '▶ Run' button.  Runs only that single step.
         on_activate_span_session:
             Optional callback invoked when a SPAN_SESSION parameter's
             'Configure...' button is clicked.  If None, SPAN_SESSION
             parameters render as disabled.
         """
         self._on_param_changed = on_param_changed
-        self._on_run_from = on_run_from
+        self._on_run_step = on_run_step
         self._on_activate_span_session = on_activate_span_session
         self._param_widgets: dict[str, dict[str, tk.Variable]] = {}
 
@@ -110,7 +110,7 @@ class ParameterPanel:
                   font=theme.SECTION_HEADER_FONT).pack(side=tk.LEFT)
         ttk.Button(
             header, text="\u25B6 Run", width=6,
-            command=lambda sid=step_desc.id: self._on_run_from(sid),
+            command=lambda sid=step_desc.id: self._on_run_step(sid),
         ).pack(side=tk.RIGHT)
 
         body = ttk.Frame(parent)
@@ -252,7 +252,7 @@ class ParameterPanel:
         value = var.get()
         self._on_param_changed(step_id, param_name, value)
         if self.auto_rerun.get():
-            self._on_run_from(step_id)
+            self._on_run_step(step_id)
 
     @staticmethod
     def _browse_file(var: tk.StringVar) -> None:
